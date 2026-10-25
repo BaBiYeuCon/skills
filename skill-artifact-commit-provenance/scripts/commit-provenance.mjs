@@ -19,6 +19,9 @@ OPTIONS
   --require-complete   H2 and H3 must both exist (exit 4 otherwise)
   --ref <path>         repo-relative resource to test; repeatable; must not be
                        absolute or contain a ".." segment
+  --refs-none          declare that the enumeration found zero referenced
+                       resources; PACKAGE becomes "complete (0 referenced
+                       resources)"; not combinable with --ref
   -h, --help           print this text
 
 OUTPUT LINES
@@ -26,7 +29,9 @@ OUTPUT LINES
   CHAIN                              h0=h1, h1=h2, h2=h3 comparisons
   TARGET_STAGED                      no | yes | deleted
   STAGED_PATHS / STAGED_EXTRA        the staged set, and entries other than target
-  REF <path> / PACKAGE               tracked or untracked per referenced resource
+  REF <path> / PACKAGE               tracked or untracked per referenced resource;
+                                     PACKAGE stays not-checked until --ref or
+                                     --refs-none says what was enumerated
   TRACKED_FILES / UNTRACKED_FILES    recursive counts from git ls-files
 
 VERDICTS / EXIT
@@ -72,7 +77,7 @@ function git(root, args, { allowFail = false } = {}) {
 }
 
 function parseArgs(argv) {
-  const opts = { artifact: null, expect: null, requireComplete: false, refs: [] };
+  const opts = { artifact: null, expect: null, requireComplete: false, refs: [], refsNone: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") {
@@ -84,6 +89,8 @@ function parseArgs(argv) {
       opts.expect = value;
     } else if (arg === "--require-complete") {
       opts.requireComplete = true;
+    } else if (arg === "--refs-none") {
+      opts.refsNone = true;
     } else if (arg === "--ref") {
       const value = argv[++i];
       if (value === undefined || value.startsWith("--")) throw new UsageError("missing value for --ref");
@@ -97,6 +104,9 @@ function parseArgs(argv) {
     }
   }
   if (!opts.artifact) throw new UsageError("missing <artifact-path>");
+  if (opts.refsNone && opts.refs.length) {
+    throw new UsageError("--refs-none cannot be combined with --ref");
+  }
   if (opts.expect !== null) {
     if (!/^[0-9a-fA-F]{64}$/.test(opts.expect)) {
       throw new UsageError("--expect must be a 64-character hex SHA-256");
@@ -190,7 +200,9 @@ function main(argv) {
     ref,
     tracked: git(root, ["ls-files", "--error-unmatch", "--", ref], { allowFail: true }).status === 0,
   }));
-  const packageState = refs.length === 0 ? "not-checked" : refs.every((r) => r.tracked) ? "complete" : "partial";
+  let packageState = "not-checked";
+  if (refs.length > 0) packageState = refs.every((r) => r.tracked) ? "complete" : "partial";
+  else if (opts.refsNone) packageState = "complete (0 referenced resources)";
 
   const drift = [];
   if (opts.expect !== null) {

@@ -36,6 +36,20 @@ line answers neither.
    cwd: `git status` there answers a different question and can hand you a
    repository that must not receive this commit.
 
+   Then pin the pathspec base once. Derive `<rel>`, the artifact's path relative
+   to `<root>`, and pass it to every later command as `git -C <root> … -- <rel>`.
+   Do not re-enter the artifact directory for a status check: `-C
+   <artifact-dir>` moves the pathspec base there, so `git -C <artifact-dir>
+   status -- <dir-name>` asks about `<artifact-dir>/<dir-name>` and prints
+   nothing with exit 0 — the same output an invented pathspec produces. Empty
+   porcelain means "nothing matched", not "untracked" and not "clean". Settle
+   the state with exit codes:
+
+   ```
+   git -C <root> ls-files --error-unmatch -- <rel>   # 1 = untracked
+   git -C <root> check-ignore -v -- <rel>            # 0 = an ignore rule wins
+   ```
+
 2. **Classify authority.** Three cases, three behaviours:
    - The top-level is the repo you were told to commit into: proceed.
    - The path sits inside a different repo (dotfiles, monorepo): proceed only
@@ -59,6 +73,11 @@ line answers neither.
    shasum -a 256 <artifact-path>
    ```
 
+   If no H0 exists — validation passed but no digest was taken, or the recorded
+   one predates a later edit — do not backfill it from this measurement. Re-run
+   the complete validation suite first, then record its digest as H0. A
+   backfilled H0 equals H1 by construction, so the drift gate could never fire.
+
    Equal means H1 = H0. Different means the validated bytes are gone: re-read
    the whole file, confirm your own edits survived, read what was added, prove
    any newly referenced resource exists **and runs**, then re-run the complete
@@ -78,6 +97,12 @@ line answers neither.
    `STAGED_SET_NOT_EXACT`; `git -c core.quotePath=false` unquotes the display
    but still splits on newlines, so only `-z` is exact. Where untracked
    siblings exist, `git add -A` and `git add .` are forbidden.
+
+   Before staging, an untracked directory is collapsed: `git status --porcelain
+   -- <dir>` prints `?? <dir>/` and names no file, so add `-uall` (or read `git
+   ls-files --others --exclude-standard -z`) whenever you need the file itself.
+   After staging, compare the cached set only; the worktree list answers a
+   different question.
 
 6. **Check identity; never configure it.** `git config user.name` and
    `git config user.email` must resolve. Never change git config.
@@ -99,14 +124,32 @@ line answers neither.
    SHA-256 digest. A commit exit code is not provenance.
 
 9. **Report package completeness.** Enumerate every resource the committed file
-   references (`scripts/…`, `references/…`, `assets/…`) and test each:
+   references (`scripts/…`, `references/…`, `assets/…`) from the file itself,
+   not from memory:
+
+   ```
+   grep -oE '(^|[^A-Za-z0-9._/-])(scripts|references|assets)/[A-Za-z0-9._/-]+' \
+     <artifact-path> | sed -E 's#.*(scripts|references|assets)/#\1/#' | sort -u
+   ```
+
+   The left boundary matters: `other-skill/scripts/helper.mjs` is that skill's
+   resource, not this package's, and must not be passed as `--ref`. A looser
+   class that admits backticks and closing punctuation also counts the
+   placeholder `scripts/…` and cuts a markdown link in half. The matches are
+   skill-relative; `--ref` and `ls-files` want repo-relative ones, so prefix
+   them with the skill directory. Test each:
 
    ```
    git -C <root> ls-files --error-unmatch -- <ref>
    ```
 
    Exit 0 means tracked, exit 1 means untracked. Any untracked resource means
-   the package is not committed, whatever the commit says.
+   the package is not committed, whatever the commit says. Zero matches is a
+   conclusion, not a skip: an artifact that references no `scripts/`,
+   `references/` or `assets/` path is a complete package, and `--refs-none`
+   makes the inspector print exactly that. `PACKAGE: not-checked` only means
+   nobody enumerated — never copy it into the report, and never read it as
+   partial.
 
 ## One-shot inspector
 
@@ -118,7 +161,8 @@ node ~/.qoder/skills/skill-artifact-commit-provenance/scripts/commit-provenance.
 
 # after staging, and again after the commit (the final proof)
 node ~/.qoder/skills/skill-artifact-commit-provenance/scripts/commit-provenance.mjs \
-  <artifact-path> --expect <sha256> [--require-complete] [--ref <repo-relative-path>]...
+  <artifact-path> --expect <sha256> [--require-complete] \
+  [--ref <repo-relative-path>]... [--refs-none]
 ```
 
 It prints `REPO`, `HEAD`, `H0`–`H3`, `CHAIN` (`h0=h1`, `h1=h2`, `h2=h3` as
@@ -128,7 +172,10 @@ It prints `REPO`, `HEAD`, `H0`–`H3`, `CHAIN` (`h0=h1`, `h1=h2`, `h2=h3` as
 `UNTRACKED_FILES` and `VERDICT`; it writes
 nothing. Both counts are recursive file counts from `git ls-files`, not the
 entry count of `git status`. `--ref` accepts repo-relative paths only: an empty
-value, an absolute path or any `..` segment is a usage error.
+value, an absolute path or any `..` segment is a usage error. `--refs-none`
+declares that the enumeration found no referenced resource: `PACKAGE` becomes
+`complete (0 referenced resources)`, and combining it with `--ref` is a usage
+error. Without either flag the line stays `not-checked`.
 
 Exit codes: 0 `MATCH` or `MEASURED_ONLY`, 1 `DRIFT`, `STAGED_SET_NOT_EXACT` or
 `CHAIN_BROKEN`, 2 usage, 3 `OUTSIDE_REPO`, 4 `CHAIN_INCOMPLETE`. A staged
@@ -168,7 +215,7 @@ COMMIT: <short sha> | not created
 COMMITTED_PATHS: <paths>
 STAGED_EXTRA: none | <paths>
 TRACKED_FILES / UNTRACKED_FILES: <n> / <n> (recursive)
-PACKAGE: complete | partial (<untracked refs>) | not-checked
+PACKAGE: complete | complete (0 referenced resources) | partial (<untracked refs>)
 VERDICT: COMMITTED_PROVEN | MESSAGE_ONLY | BLOCKED (<reason>)
 ```
 
@@ -176,6 +223,8 @@ The inspector's `VERDICT` is mechanical; the report's is a conclusion. Map them
 explicitly: `MATCH (h0=h1=h2=h3)` under `--require-complete` →
 `COMMITTED_PROVEN`; `MEASURED_ONLY` or a pending index/head → `MESSAGE_ONLY`;
 `DRIFT`, `STAGED_SET_NOT_EXACT` or `CHAIN_BROKEN` → `BLOCKED` naming the stage.
+`PACKAGE` is never `not-checked` in a report: pass `--ref` for each enumerated
+resource, or `--refs-none` when the enumeration returned none.
 
 ## Measured case (2026-10-25, re-measured 2026-10-26)
 
@@ -206,22 +255,50 @@ Artifact: `~/.qoder/skills/session-sourced-skill-distillation/SKILL.md`.
   edit was not. Re-run everything.
 - These counts drift. Re-measure them on every run.
 
+### Reproduced 2026-10-26: pathspec base, H0, zero-reference packages
+
+Same repo, HEAD `663b2d6`, `shell-command-result-verification/` still untracked:
+
+- `git -C shell-command-result-verification status --porcelain --
+  shell-command-result-verification` printed nothing, exit 0. The same command
+  with the invented pathspec `definitely-not-here` also printed nothing, exit
+  0, so the two cases are indistinguishable.
+- `git -C /Users/khoi/.qoder/skills status -uall -- shell-command-result-
+  verification` listed its three files. Without `-uall`, the same check printed
+  `?? shell-command-result-verification/` and named none of them.
+- `commit-provenance.mjs <artifact> --require-complete` with no `--ref`
+  printed `PACKAGE: not-checked`, exit 0, for an already-committed file:
+  `--require-complete` constrains H2/H3 only.
+- Commit `663b2d6` was made only after re-validating the exact bytes and
+  recording H0 at that point; validation had passed earlier, but no digest
+  accompanied it.
+- This skill's own package is `SKILL.md` plus
+  `scripts/commit-provenance.mjs`. Both are tracked, and the package reads
+  `complete` only when that repo-relative `--ref` is passed.
+
 ## Hard rules
 
 - Measure repo membership from the artifact's directory every time; a sibling
   repo is not a default target.
+- After that resolution, run status, add, diff and show from `<root>` with
+  repo-relative paths. Never use the artifact directory as the pathspec base,
+  and never read empty output as clean or as untracked.
 - AGENTS.md and task rules outrank convenience; repo membership is not
   permission.
 - No `git init` in a shared directory without the owner's explicit choice;
   report the side effects afterwards.
 - Drift means re-read the whole file and re-run the complete validation suite;
   update H0 only after it passes.
+- H0 is recorded only after a passing validation of those exact bytes and is
+  never backfilled from H1.
 - Prove a newly referenced resource exists and runs before it enters the
   commit.
 - Stage exact paths only, then verify the staged set.
 - A first commit carrying concurrent content must name it.
 - A file-level commit is not a committed package; list untracked referenced
   resources.
+- Zero referenced resources is `complete (0 referenced resources)`;
+  `not-checked` is not a reportable package state.
 - H0 = H1 = H2 = H3 is the proof; the commit's exit code is not.
 - No config changes, amend, reset, force-push or push.
 
@@ -229,6 +306,9 @@ Artifact: `~/.qoder/skills/session-sourced-skill-distillation/SKILL.md`.
 
 - A proven commit says nothing about correctness, test coverage, skill
   registration or clinical validity.
+- `COMMITTED_PROVEN` is local. Publishing is a separate authorised action: the
+  source session's push was denied 403, local and remote `main` shared no merge
+  base, and `origin` had appeared mid-run from another terminal.
 - The owner's choice authorises one commit of one named path, not a tracking
   policy for the whole directory.
 - Do not stage memory files, sibling skills or evidence directories that were
@@ -244,6 +324,8 @@ Artifact: `~/.qoder/skills/session-sourced-skill-distillation/SKILL.md`.
   actually loads.
 - `verify-skill-source-session` — verifies claims about a session; this skill
   verifies committed bytes.
+- `shell-command-result-verification` — why an empty or exit-0 result is not
+  proof; this skill applies that to git status output.
 - `frozen-snapshot-immutability-rehash` — re-hashes frozen snapshot lists, not
   commits.
 - `session-sourced-skill-distillation` — orchestrates skill creation and
