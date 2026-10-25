@@ -105,11 +105,18 @@ by the package's own pass. Keep examples in a non-parsed form, as this file does
 
    One expectation per line, in the form `<source>:<line> -> <target>:<line> |
    <asserted section text>`. The script's `--help` prints a concrete sample.
-   Then run `check_skill.mjs`, then `check_citations.mjs --full`. Report one row
-   per citation: old line, new line, printed heading, asserted section. A
-   citation you touched but did not print the anchor for is not verified. When
-   rehearsing on a copy, name the copy directory after the skill: `check_skill.mjs`
-   compares the frontmatter `name` to the folder name and fails on anything else.
+   Then run `check_skill.mjs --check-refs`, then `check_citations.mjs --full`.
+   The flag resolves only backticked inline code whose path begins with
+   `scripts/`, `references/` or `assets/`, relative to the checked package; a
+   `~/` or absolute path is not matched. A sibling package's file therefore has
+   to be cited by its full `~/.qoder/skills/<pkg>/references/<file>.md` path —
+   written bare it is read as a file this package must contain and fails as
+   `broken inline-code path`. Do not copy the sibling file in to silence it.
+   Report one row per citation: old line, new line, printed heading, asserted
+   section. A citation you touched but did not print the anchor for is not
+   verified. When rehearsing on a copy, name the copy directory after the skill:
+   `check_skill.mjs` compares the frontmatter `name` to the folder name and fails
+   on anything else.
 
 ## Worked example (one run, historical)
 
@@ -153,7 +160,10 @@ in each copy of the table.
   skill asserts a heading. Point at the heading line.
 - Keep mirrored copies identical in code set, order and count.
 - Write illustrative citations so the checker does not parse them, or the
-  package's own citation pass will report them as missing files.
+  package's own citation pass will report them as missing files. Cite another
+  package's file by its full `~/.qoder/skills/<pkg>/references/<file>.md` path;
+  a bare `references/<file>.md` is resolved inside this package. Never copy the
+  sibling file in to pass the check.
 - If the file changed between your read and your edit, stop and use
   `concurrent-skill-md-edit-recovery` instead of writing over it.
 
