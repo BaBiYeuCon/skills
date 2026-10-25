@@ -19,6 +19,8 @@ OPTIONS
   --require-complete   H2 and H3 must both exist (exit 4 otherwise)
   --ref <path>         repo-relative resource to test; repeatable; must not be
                        absolute or contain a ".." segment
+  --expect-path <path> additional repo-relative path that must be staged with
+                       the artifact; repeatable; same validity rules as --ref
   --refs-none          declare that the enumeration found zero referenced
                        resources; PACKAGE becomes "complete (0 referenced
                        resources)"; not combinable with --ref
@@ -28,7 +30,11 @@ OUTPUT LINES
   H1_WORKTREE / H2_INDEX / H3_HEAD   content digests (absent = not at that stage)
   CHAIN                              h0=h1, h1=h2, h2=h3 comparisons
   TARGET_STAGED                      no | yes | deleted
-  STAGED_PATHS / STAGED_EXTRA        the staged set, and entries other than target
+  STAGED_PATHS / STAGED_EXTRA        the staged set, and entries other than the
+                                     expected paths
+  EXPECT_PATHS / STAGED_MISSING      with --expect-path: the extra expected paths,
+                                     and those not staged (not-checked before the
+                                     artifact itself is staged)
   REF <path> / PACKAGE               tracked or untracked per referenced resource;
                                      PACKAGE stays not-checked until --ref or
                                      --refs-none says what was enumerated
@@ -44,12 +50,12 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 const nul = (buf) => buf.toString("utf8").split("\0").filter(Boolean);
 const firstLine = (buf) => (buf && buf.toString("utf8").split("\n")[0].trim()) || "";
 
-function validateRef(ref) {
+function validateRef(ref, flag = "--ref") {
   const segments = ref.split(/[\\/]/);
-  if (!ref) throw new UsageError('--ref must be a non-empty repo-relative path');
-  if (path.isAbsolute(ref)) throw new UsageError(`--ref must be repo-relative, not absolute: ${ref}`);
-  if (segments.includes("..")) throw new UsageError(`--ref must not contain a ".." segment: ${ref}`);
-  if (ref.startsWith("-")) throw new UsageError(`--ref must not start with "-": ${ref}`);
+  if (!ref) throw new UsageError(`${flag} must be a non-empty repo-relative path`);
+  if (path.isAbsolute(ref)) throw new UsageError(`${flag} must be repo-relative, not absolute: ${ref}`);
+  if (segments.includes("..")) throw new UsageError(`${flag} must not contain a ".." segment: ${ref}`);
+  if (ref.startsWith("-")) throw new UsageError(`${flag} must not start with "-": ${ref}`);
   return ref;
 }
 
@@ -77,7 +83,7 @@ function git(root, args, { allowFail = false } = {}) {
 }
 
 function parseArgs(argv) {
-  const opts = { artifact: null, expect: null, requireComplete: false, refs: [], refsNone: false };
+  const opts = { artifact: null, expect: null, requireComplete: false, refs: [], refsNone: false, expectPaths: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") {
@@ -89,6 +95,10 @@ function parseArgs(argv) {
       opts.expect = value;
     } else if (arg === "--require-complete") {
       opts.requireComplete = true;
+    } else if (arg === "--expect-path") {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith("--")) throw new UsageError("missing value for --expect-path");
+      opts.expectPaths.push(validateRef(value, "--expect-path"));
     } else if (arg === "--refs-none") {
       opts.refsNone = true;
     } else if (arg === "--ref") {
@@ -189,8 +199,11 @@ function main(argv) {
       ? nul(stagedProbe.stdout)
       : nul(git(root, ["ls-files", "--cached", "-z"], { allowFail: true }).stdout);
   const targetStaged = staged.includes(relPosix);
-  const stagedExtra = staged.filter((p) => p !== relPosix);
-  const stagedOk = stagedExtra.length === 0;
+  const expectPaths = [...new Set(opts.expectPaths)].filter((p) => p !== relPosix);
+  const expected = new Set([relPosix, ...expectPaths]);
+  const stagedExtra = staged.filter((p) => !expected.has(p));
+  const stagedMissing = targetStaged ? expectPaths.filter((p) => !staged.includes(p)) : [];
+  const stagedOk = stagedExtra.length === 0 && stagedMissing.length === 0;
   const targetState = targetStaged ? (inIndex ? "yes" : "deleted") : "no";
 
   const trackedCount = nul(git(root, ["ls-files", "-z"], { allowFail: true }).stdout).length;
@@ -236,6 +249,14 @@ function main(argv) {
     `TARGET_STAGED: ${targetState}`,
     `STAGED_PATHS: ${staged.length ? staged.join(", ") : "none"}`,
     `STAGED_EXTRA: ${stagedExtra.length ? stagedExtra.join(", ") : "none"}`,
+    ...(expectPaths.length
+      ? [
+          `EXPECT_PATHS: ${expectPaths.join(", ")}`,
+          `STAGED_MISSING: ${
+            targetStaged ? (stagedMissing.length ? stagedMissing.join(", ") : "none") : "not-checked"
+          }`,
+        ]
+      : []),
     `STAGED_OK: ${stagedOk ? "yes" : "no"}`,
     ...refs.map((r) => `REF ${r.ref}: ${r.tracked ? "tracked" : "untracked"}`),
     `PACKAGE: ${packageState}`,
@@ -246,7 +267,12 @@ function main(argv) {
 
   const issues = [];
   if (drift.length) issues.push(`DRIFT (${drift.join(", ")})`);
-  if (!stagedOk) issues.push(`STAGED_SET_NOT_EXACT (extra: ${stagedExtra.join(", ")})`);
+  if (!stagedOk) {
+    const parts = [];
+    if (stagedExtra.length) parts.push(`extra: ${stagedExtra.join(", ")}`);
+    if (stagedMissing.length) parts.push(`missing: ${stagedMissing.join(", ")}`);
+    issues.push(`STAGED_SET_NOT_EXACT (${parts.join("; ")})`);
+  }
   if (chainBroken) issues.push("CHAIN_BROKEN (index absent while HEAD present; target staged as deletion)");
   if (missing.length) issues.push(`CHAIN_INCOMPLETE (${missing.join(", ")} absent)`);
 
