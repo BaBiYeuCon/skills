@@ -59,9 +59,19 @@ its position against the slot baseline and read that band's `coveredPrintedPixel
 neighbour's. Do not clip the zone to exclude the neighbour; a clipped zone undercounts coverage when
 the target line moves lower.
 
-Path template, not runnable as written — `rasters/…` and `out/…` are relative to the E2E working
-directory that holds the rasters, while `references/zones.example.json` is relative to this skill
-directory; the runnable `$E2E` form is under Reproduce in `references/chc-stt600-case.md`.
+**Path check.** The block is a template with mixed roots; prove both before reading a result.
+
+- From this skill directory, both `rasters/…` inputs are absent and `references/zones.example.json`
+  is present. Running the block exits 2 with `SOURCE_PNG_UNREADABLE`; that is a path failure, not a
+  measurement.
+- From the E2E directory that holds the rasters, `scripts/measure-slot-bands.mjs` is absent. Node
+  exits 1 with `Cannot find module`; also not a measurement.
+- Run the Reproduce command in `references/chc-stt600-case.md` from this skill directory with `E2E`
+  set. Require at least one must-fail and one pass branch: `demo-288-lift3` exits 1 with
+  `COVERED_PRINTED_INK`; `demo-288` exits 0 with `NO_COVERED_PRINTED_INK`.
+- Pass an absolute `--out` outside this skill directory, such as `$E2E/out/measure.json` or
+  `/tmp/stt600-measure.json`. The script creates the parent directory, so a relative
+  `out/measure.json` after fixing only `--source` would leave a stray `out/` under the skill root.
 
 ```
 node scripts/measure-slot-bands.mjs \
@@ -182,6 +192,8 @@ cite the ink-loss gate as proof that text did not cover printed furniture.
 - Never rebuild a stored job summary from the minimal repaint extraction.
 - Never reuse a backup name across QA rounds.
 - Never treat `lostSourceInkPixels: 0` as proof that painted text did not cover printed ink.
+- Never report a path failure (exit 2, or `Cannot find module`) as a coverage verdict. Prove both
+  roots first.
 - Never claim byte identity from a zero raster diff; claim raster identity only.
 - Never shrink a font, widen a slot, relabel a region or lower a threshold to make a line fit.
 - Never move, paint or measure into a signature keep-out while its geometry is unapproved.
