@@ -1,6 +1,6 @@
 ---
 name: git-push-destination-preflight
-description: Pre-push gate re-resolving destination, credential path, publish set and history before any git push. Use when asked to push a commit or branch, when push failed with 403 / non-fast-forward / "Permission denied (publickey)", when origin was absent or its URL/protocol changed mid-task, when histories share no merge base, when asked to switch accounts or whether an account may push, or when naming a new remote branch. Covers remote/pushURL re-reads, gh auth status / helper / ssh-agent / push-permission checks without secrets, merge-base and divergence counts, publish-set and visibility disclosure, branch-name collision checks, one explicit src:dst push, and ls-remote remote-ref verification (not the tracking cache), plus a read-only HTTPS probe when SSH auth fails. Stops with the exact blocker instead of retrying, force-pushing, adding remotes or changing credentials. Commit provenance: skill-artifact-commit-provenance; exit codes: shell-command-result-verification; key/credential lifecycle is out of scope.
+description: Pre-push gate and post-push proof for git push. Use when asked to push a commit or branch; when a push failed with 403 / non-fast-forward / forced update / "Permission denied (publickey)"; when origin appeared or its URL/protocol/pushURL changed; when histories share no merge base; when push.followTags or remote.<name>.push may carry extra refs; when an account cannot push; or when naming a remote branch. Covers remote/pushURL re-reads, identity checks without secrets, merge-base and divergence counts, publish-set and visibility disclosure, branch-name collision checks at the push URL, one explicit src:dst push, exit code captured outside a pipeline, and ls-remote verification at the push URL with full object IDs, plus a read-only HTTPS probe when SSH auth fails. Stops with the exact blocker instead of retrying, force-pushing, adding remotes or changing credentials. Commit provenance: skill-artifact-commit-provenance; exit codes: shell-command-result-verification; key/credential lifecycle is out of scope.
 ---
 
 # Git Push Destination Preflight
@@ -12,7 +12,9 @@ Measure four facts immediately before pushing: where it goes (remote, URL,
 pushURL, protocol), who sends it (credential path and account), whether the
 histories are related, and exactly which commits become visible on the remote.
 If any is unresolved or contradictory, stop and report the exact blocker. A
-successful `git commit` says nothing about any of them.
+successful `git commit` says nothing about any of them, and a successful push
+report says nothing about where it landed: after the attempt, query the push
+URL and compare full object IDs.
 
 ## Trigger shape
 
@@ -26,6 +28,8 @@ successful `git commit` says nothing about any of them.
   authenticated.
 - The owner names a new remote branch, or a push has returned success and the
   remote ref must be verified rather than assumed.
+- `push.followTags` is set, `remote.<name>.push` exists, or the remote has a
+  pushURL that differs from its fetch URL.
 - Commit provenance just passed and the owner now asks to push.
 
 ## Gate 0 - resolve the destination at push time
@@ -45,7 +49,15 @@ git rev-parse --abbrev-ref --symbolic-full-name '@{u}'
   list was empty with exit 0 at 06:16:34, `origin` was added at 06:16:47 and
   fetched at 06:16:55, and the push then targeted that URL. Re-run after any
   failure and read `.git/config` directly.
-- Read URL and pushURL. They can differ; a push uses the push URL.
+- Read URL and pushURL. They can differ; a push uses the push URL. Capture it
+  once and use it for every remote measurement in Gates 3 and 4:
+
+  ```sh
+  PUSH_URL="$(git remote get-url --push origin)"; echo "$PUSH_URL"
+  ```
+
+  Redact any `user:token@` part before it enters a report; the URL that proves a
+  push is its host and path, never a credential.
 - Read the protocol. HTTPS uses the git credential helper or `gh`; SSH uses
   ssh-agent and keys. Gate 1 depends on it.
 - A remote can change between turns. Measured here: HTTPS at the failed push,
@@ -69,6 +81,10 @@ ssh-add -l
 
 - `gh auth status` reports the active account, protocol, scopes and a masked
   token. That is identity inspection, not a secret read.
+- Scopes are not permission. Measured: the denied account's token carried the
+  `repo` scope and still received 403. Scopes describe what a token may ask
+  for, not what an account may write to one repository; only the `permissions`
+  probe or the push result speaks to write access.
 - Run `ssh-add -l` only for an SSH destination. Exit 1 with "The agent has no
   identities" is a result, not a command failure.
 - Never run `gh auth token`, never query the keychain
@@ -175,30 +191,51 @@ git status --short
 - Before pushing a new branch, prove the name is free:
 
   ```sh
-  REMOTE=origin; BRANCH=main
-  git ls-remote --heads "$REMOTE" "<new-branch>"
-  git ls-remote --heads "$REMOTE" "$BRANCH"   # positive control
+  PUSH_URL="$(git remote get-url --push origin)"; BRANCH=main
+  git ls-remote --heads "$PUSH_URL" "<new-branch>"
+  git ls-remote --heads "$PUSH_URL" "$BRANCH"   # positive control
   ```
 
   Empty for the candidate and a ref for the control means the check
   discriminates. If the candidate already exists, stop and ask; never
   overwrite it. If the control is also empty, the remote has no refs or no such
   base branch and the check proves nothing: use a base ref that exists, or
-  report the collision check as unmeasurable before pushing.
+  report the collision check as unmeasurable before pushing. Ask the push URL,
+  not `ls-remote <remote>`: the latter reads the fetch URL, so a name held in
+  the other repository can come back free.
+- Bound the ref set before sending. An explicit single refspec is necessary but
+  not sufficient:
+
+  ```sh
+  git config --get push.followTags
+  git config --get-all remote.origin.push
+  ```
+
+  Measured (git 2.55.0, throwaway repos): with `push.followTags=true`,
+  `git push origin main:refs/heads/main` also carried an annotated tag
+  (`* [new tag] vA -> vA`), and `--no-follow-tags` kept the next tag local.
+  `remote.<remote>.push` refspecs are another source of extra refs. Report every
+  ref the push carried, not only the one you asked for.
 - Use the explicit mapping, for example
-  `git push origin main:refs/heads/<branch>`. No `--force`, no
-  `--force-with-lease`, no tags or other refs unless asked, and no `-u` unless
-  the tracking decision was made.
+  `git push --porcelain --no-follow-tags origin main:refs/heads/<branch>`. No
+  `--force`, no `--force-with-lease`, no tags or other refs unless asked, and no
+  `-u` unless the tracking decision was made.
+- Rehearse with `--dry-run` when the ref set is uncertain: measured, it wrote
+  nothing - the remote SHA was identical before and after - and it still printed
+  the extra refs the real push would carry. A rehearsal is not proof.
 - Snapshot the remote heads and the local cache before and after:
 
   ```sh
-  REMOTE=origin
-  git ls-remote --heads "$REMOTE"
+  PUSH_URL="$(git remote get-url --push origin)"
+  git ls-remote --heads "$PUSH_URL"
   git for-each-ref refs/remotes/<remote>
   ```
 
   The first is authoritative; the second is a local cache and can be stale.
-- Record the command, stderr, exit code and both snapshots. One attempt only; a
+- Record the command, stderr, exit code and both snapshots. Capture the exit
+  code outside any pipeline (`git push … >push.out 2>push.err; rc=$?`):
+  measured, `git push | tail` printed `push_exit=0` from `tail` while the same
+  rejected push exited 1 when captured without the pipe. One attempt only; a
   failure goes to triage, not a retry loop.
 
 ## Gate 4 - verify the remote ref, not the tracking cache
@@ -206,20 +243,36 @@ git status --short
 After the single push attempt:
 
 ```sh
-REMOTE=origin; DEST=<remote-branch>; SRC=<source-ref>; BASE=<base-branch>
-git ls-remote --heads "$REMOTE" "$DEST"
+PUSH_URL="$(git remote get-url --push origin)"; DEST=<remote-branch>
+SRC=<source-ref>; BASE=<base-branch>
+git ls-remote --heads "$PUSH_URL" "$DEST"
 git rev-parse "$SRC"
-git ls-remote --heads "$REMOTE" "$BASE"
+git ls-remote --heads "$PUSH_URL" "$BASE"
 ```
 
+- Query the **push URL**, not `git ls-remote origin`. `ls-remote <remote>` reads
+  the fetch URL; when `pushurl` differs it answers about the other repository.
+  Measured: pushurl `B.git` received the commit, fetch URL `A.git` stayed
+  empty, and `git ls-remote origin` printed nothing with exit 0.
 - The pushed ref must exist on the remote and its SHA must equal the local
   source SHA. The base branch must still equal the pre-push SHA - unless the
   push targets the base branch itself, where its SHA is expected to become the
   pushed SHA. Any other change to the base means something else wrote to the
   remote and needs explanation before the push is reported.
+- Compare full 40-character object IDs. The pushed commit must equal the commit
+  proven by `skill-artifact-commit-provenance`; an abbreviated match is
+  ambiguous.
+- Read the `--porcelain` lines for every ref. A forced update (`+` or `forced
+  update`) replaced remote history; report it as such and never as a proven push
+  of the commit you validated. `Everything up-to-date` means the remote already
+  held that SHA: not a failed push, and still not a substitute for the
+  `ls-remote` reading.
 - `refs/remotes/<remote>/<branch>` is a local cache. A failed push can leave it
   stale; a successful push may update it, but the remote query is authoritative.
-  Report `REMOTE_REF` from `ls-remote`, not from `for-each-ref`.
+  Report `REMOTE_REF` from `ls-remote`, not from `for-each-ref`. Measured: with
+  `pushurl` naming a second repository, the push updated local `origin/main` to
+  the pushed SHA while the fetch URL had no such branch - that ref was never
+  evidence about the repository the fetch URL names.
 - If SSH auth blocks `ls-remote`, query the public HTTPS URL directly for a
   read-only check:
 
@@ -229,7 +282,8 @@ git ls-remote --heads "$REMOTE" "$BASE"
 
   Do not change `origin`, the credential helper or the protocol just to verify.
   If the repo is private or the query fails, report `UNVERIFIED` instead of
-  `PUSHED`.
+  `PUSHED`. That URL must name the same repository as the push URL; when they
+  differ it verifies only the fetch URL.
 - Positive control: query the known base branch and require a ref. An empty
   candidate result proves nothing until the same command returns the control.
 - A successful push proves transfer only; it does not prove CI, review,
@@ -244,6 +298,8 @@ git ls-remote --heads "$REMOTE" "$BASE"
 | `Permission denied (publickey)` | SSH key or agent problem | Stop. Report `ssh-add -l` and the key state. Do not switch gh accounts, edit config or add keys. A public remote can still be read over its HTTPS URL for ref verification; that is a read-only probe, not an auth workaround. |
 | `repository not found`, `404` | Wrong URL, or no access to a private repo | Re-resolve the URL. Stop. |
 | `push` returned success but the remote ref is missing or has a different SHA | The transfer report is not a ref measurement | Stop. Re-measure with `ls-remote`; report `PUSHED_UNVERIFIED`, not `PUSHED`. |
+| `[new tag]` or an unrequested ref in the output | `push.followTags` or `remote.<name>.push` added refs | Stop. Report every ref carried; remove nothing without owner direction. |
+| `ls-remote <remote>` empty with exit 0, or local `origin/<branch>` moved while the fetch URL lacks it | You measured the fetch URL; the push may go to another repository | Re-read `git remote get-url --push <remote>` and query that URL. |
 | `No configured push destination`, no upstream | The remote or tracking is unset | Stop. Ask the owner for the destination. Do not add a remote silently. |
 
 After a failed attempt, report whether refs changed as `measured` (from the
@@ -284,10 +340,13 @@ IDENTITY: <active account|none> | helper <...> | ssh agent <n identities|none>
 PERMISSION: <push true|false|unknown> for <account> | VISIBILITY: <public|private|unknown>
 HISTORY: merge-base <sha|none> (exit <n>) | left/right <remote>/<local> | roots <sha>/<sha>
 PUBLISH_SET: <n commits; authors; non-task commits disclosed>
+PUSH_URL: <url> | same as fetch URL
 COMMAND: <exact push command, or not-attempted>
-PUSH: not-attempted | attempted once (exit <n>) | <stderr summary>
+PUSH: not-attempted | attempted once (exit <n>, captured outside a pipeline) | <stderr summary>
+REFS_CARRIED: <refs from --porcelain> | not-measured
 REFS_UPDATED: measured <remote heads> | inferred none (<evidence>) | not-measured
-REMOTE_REF: <ls-remote sha|unverified> | BASE_REF: <unchanged|changed|unverified>
+REMOTE_REF: <full sha at push URL|unverified> | BASE_REF: <unchanged|changed|unverified>
+PROOF: <remote sha> = <validated commit sha> | differs | forced | not-measured
 VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<reason>) | LEFT_LOCAL
 ```
 
@@ -324,6 +383,15 @@ VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<
 - Exit-code trap measured in the same session: the first SSH `ls-remote`
   printed `ls_remote_exit=0` beside a fatal error; re-running the command alone
   returned 128. Capture the command's own status, not a pipeline's.
+- Post-push proof measured locally on 2026-10-26 in throwaway repos (git
+  2.55.0), never against `khoi/skills`: `push.followTags=true` added
+  `* [new tag] vA -> vA` to an explicit single-refspec push, and
+  `--no-follow-tags` kept the next tag local; with `pushurl` = `B.git` and fetch
+  URL `A.git`, the push landed in B, local `origin/main` updated to the pushed
+  SHA, `git ls-remote origin` returned empty with exit 0, and A had no such
+  branch; `--dry-run` left the remote SHA unchanged; `git push | tail` printed
+  `push_exit=0` while the same rejected push exited 1 when captured without a
+  pipe.
 
 ## Hard rules
 
@@ -334,6 +402,8 @@ VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<
 - Never read tokens, keychain entries or private keys. `gh auth status`, the
   credential-helper config and `ssh-add -l` are the only identity probes.
 - Match the credential check to the resolved protocol.
+- Token scopes are not repository write permission; only the `permissions`
+  probe or the push result speaks to write access.
 - Measure push permission and visibility before the attempt. `push:false` for
   the sending account, or `PERMISSION_UNKNOWN` without the owner naming the
   account, stops the push.
@@ -344,8 +414,12 @@ VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<
   not part of the approved task.
 - Check a new branch name is free before pushing; never overwrite an existing
   remote ref.
-- Verify the pushed ref with `ls-remote`; `refs/remotes/...` is a cache, not
-  proof.
+- An explicit refspec is not a ref-set guarantee; read `push.followTags` and
+  `remote.<name>.push`, and report every ref the push carried.
+- Verify the pushed ref at the push URL with `ls-remote`, comparing full object
+  IDs; `refs/remotes/...` is a cache, not proof.
+- Capture the push's own exit code outside any pipeline. A forced update is not
+  a proven push of the commit you validated.
 - Never generate or install credentials or keys from this gate; that is a
   separate explicit owner task.
 - Never add or edit remotes, change credentials or git config, or alter refs on
