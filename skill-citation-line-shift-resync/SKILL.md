@@ -87,11 +87,15 @@ by the package's own pass. Keep examples in a non-parsed form, as this file does
 
 6. **Sync the mirrored table in the same pass.** When the rows you changed are
    duplicated (for example failure codes in `SKILL.md` and reference `§9`),
-   update both copies before re-running anything. Compare the code sets, not the
-   visual look — `diff` two sorted lists of codes. A green package check will not
-   notice that one copy has 14 rows and the other 13. Any insert or delete at the
-   table also renumbers the citations below it in that file, so re-read the
-   citing lines instead of reusing numbers captured earlier.
+   every row edit in the referenced file belongs before step 4: an insert there
+   moves the headings again. Mirror the rows into `SKILL.md` here and compare
+   the code column of both tables in row order, not sorted — a sorted diff
+   proves set and count only, not the order the hard rules also require. A
+   green package check will not notice that one copy has 14 rows and the other
+   13. The `SKILL.md` insert renumbers the citing lines below the table, so
+   re-read them instead of reusing numbers captured earlier. If a
+   reference-side row edit happens at this step, redo step 4 and step 5 before
+   asserting.
 
 7. **Assert the anchors against the final files, then re-run and tabulate.**
    Build the expectation file from the post-edit source lines and assert both
