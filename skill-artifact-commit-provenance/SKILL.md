@@ -1,6 +1,6 @@
 ---
 name: skill-artifact-commit-provenance
-description: Commit an artifact or multi-file Skill package outside the open project repo, and prove the committed bytes are the validated bytes. Use when asked to commit, stage or write a commit message for a path under ~/.qoder/skills or any file outside the working repo, when one commit carries several files (SKILL.md plus references/ and scripts/), when the artifact directory reports 'not a git repository' while another repo is open, when AGENTS.md forbids committing the workspace, when a first commit in a shared directory would sweep in untracked siblings, or when a file changes after validation. Covers git -C rev-parse ownership detection, stopping for owner approval before git init in a shared config directory, one H0 per file, re-validation after drift, staging and NUL-split diffing the exact expected path set with one inspector run per file, the per-file H0 = H1 = H2 = H3 chain with H4 separate, and untracked referenced resources. Not the in-file merge, package checking or skill registration.
+description: Commit an artifact or multi-file Skill package outside the open project repo, and prove the committed bytes are the validated bytes. Use when asked to commit, stage or write a commit message for a path under ~/.qoder/skills or any file outside the working repo, when one commit carries several files (SKILL.md plus references/ and scripts/), when the artifact directory reports 'not a git repository' while another repo is open, when AGENTS.md forbids committing the workspace, when a first commit in a shared directory would sweep in untracked siblings, or when a file changes after validation or staging. Covers git -C rev-parse ownership detection, stopping for owner approval before git init in a shared config directory, one H0 per file, re-validation after drift, staging and NUL-split diffing the exact expected path set with one inspector run per file, the per-file H0 = H1 = H2 = H3 chain with H4 separate, and untracked referenced resources. Not the in-file merge, package checking or skill registration.
 ---
 
 # Skill Artifact Commit Provenance
@@ -90,6 +90,12 @@ line answers neither.
    suite never saw those bytes: re-run the whole suite, not only that file's
    check.
 
+   Re-measure after staging too: if H1 differs from H0 while H2 still equals
+   H0, the validated bytes are in the index and the worktree moved on — a
+   concurrent writer. Clear the stale entry first (`git restore --staged --
+   <rel>`) so a later commit cannot revert their work, then follow
+   [references/concurrent-writer-recovery.md](references/concurrent-writer-recovery.md).
+
 5. **Stage exactly the expected paths, then verify the staged set.**
 
    ```
@@ -135,7 +141,9 @@ line answers neither.
    H3 is present means the index no longer holds the target: the staged change
    is a deletion (`git rm --cached` on an intact worktree produces exactly
    this). That is a chain break, never
-   a match, even when H0 = H1. `git ls-files -s` confirms mode, blob and
+   a match, even when H0 = H1. H2 equal to a stale H0 while H1 differs is the
+   same break from the other side: the index holds bytes the worktree lost.
+   `git ls-files -s` confirms mode, blob and
    stage, but its hash is a git object SHA-1 — never compare it with the
    SHA-256 digest. A commit exit code is not provenance.
 
@@ -293,6 +301,9 @@ this file documents it.
   uncommitted and the package partial.
 - A first commit of a file that concurrent sessions also edited must name their
   content in a separate paragraph; never present it as yours.
+- Name concurrent sections from the recovered blob, not from memory, and record
+  HEAD before and after: a moved HEAD means your commit landed on another
+  writer's commits and the report must say so.
 - If only the file was committed while its bundled resources stay untracked,
   say so.
 - Do not claim tests, accuracy, registration, clinical approval or a winning
@@ -313,6 +324,7 @@ PER-FILE CHAIN (one row per committed file):
 TARGET_STAGED: no | yes | deleted
 H4: <sha256 per file> | not-measured
 COMMIT: <short sha> | not created
+HEAD: <short sha before staging> -> <short sha after the commit>
 STAGED_EXTRA: none | <paths>
 STAGED_MISSING: none | <paths> | not-checked
 TRACKED_FILES / UNTRACKED_FILES: <n> / <n> (recursive)
@@ -342,57 +354,38 @@ set proof.
 
 Artifact: `~/.qoder/skills/session-sourced-skill-distillation/SKILL.md`.
 
-- Before the commit, `git -C ~/.qoder/skills rev-parse --show-toplevel` exited
-  128 (`fatal: not a git repository`). The open workspace repo was `Qoder-CHC`
-  on `qoder-handoff`, with no commits and 15 untracked top-level entries, and
-  its AGENTS.md forbids committing. The agent stopped and asked instead of
-  running `git init`.
-- The owner chose to initialise a repo for the skills directory. Identity
-  already resolved (BBYC); no config was changed.
+- No repo enclosed the skills directory (`git rev-parse` exited 128), the open
+  workspace repo forbade commits, and the agent stopped instead of running
+  `git init`; the owner then chose to initialise one. Identity resolved (BBYC);
+  no config changed.
 - The pre-commit re-hash expected `b98dbba…` but found `2136534…` (191 → 212
-  lines, 31 → 34 sibling directories). The agent re-read the whole file,
-  confirmed its two edits survived (lines 59–61 and 209–211), and ran the newly
-  referenced citation checker (`VERDICT: OK`, `citations: 0`) before committing.
-- Commit `91d6051`: 1 file changed, 212 insertions; 34 sibling directories
-  stayed untracked. `git show HEAD:… | shasum -a 256` equalled the worktree
-  digest.
-- Re-measured 2026-10-26: HEAD is still `91d6051`, `git ls-files` lists only
-  that `SKILL.md`, and `?? session-sourced-skill-distillation/scripts/`
-  remains. The committed file references the overlap matcher at
-  `session-sourced-skill-distillation/scripts/check_skill_overlap.mjs` in its
-  step 4 and Resources list, so the commit is proven while the package is
-  partial.
+  lines). The agent re-read the whole file, confirmed its two edits survived,
+  and ran the newly referenced citation checker (`VERDICT: OK`,
+  `citations: 0`) before committing.
+- Commit `91d6051`: 1 file, 212 insertions, worktree digest equal to
+  `git show HEAD:…`; 34 sibling directories stayed untracked, and the referenced
+  `session-sourced-skill-distillation/scripts/check_skill_overlap.mjs` remains
+  untracked — the commit is proven while the package is partial.
 - The drift-time re-validation is the cautionary part: duplicate-heading and
   citation checks were visible, but a full package check after the 212-line
   edit was not. Re-run everything.
 - These counts drift. Re-measure them on every run.
 
-### Reproduced 2026-10-26: pathspec base, H0, zero-reference packages
+### Reproduced 2026-10-26: pathspec base and set checks
 
-Same repo, HEAD `663b2d6`, `shell-command-result-verification/` still untracked:
-
-- `git -C shell-command-result-verification status --porcelain --
-  shell-command-result-verification` printed nothing, exit 0. The same command
-  with the invented pathspec `definitely-not-here` also printed nothing, exit
-  0, so the two cases are indistinguishable.
-- `git -C /Users/khoi/.qoder/skills status -uall -- shell-command-result-
-  verification` listed its three files. Without `-uall`, the same check printed
-  `?? shell-command-result-verification/` and named none of them.
-- `commit-provenance.mjs <artifact> --require-complete` with no `--ref`
-  printed `PACKAGE: not-checked`, exit 0, for an already-committed file:
-  `--require-complete` constrains H2/H3 only.
-- Commit `663b2d6` was made only after re-validating the exact bytes and
-  recording H0 at that point; validation had passed earlier, but no digest
-  accompanied it.
-- This skill's own package is `SKILL.md` plus
-  `scripts/commit-provenance.mjs`. Both are tracked, and the package reads
+- From inside `shell-command-result-verification/`, `git status --porcelain`
+  with that directory as the pathspec printed nothing, exit 0 — identical to an
+  invented pathspec. From the repo root, `status -uall` named its three files;
+  without `-uall` only `?? <dir>/`.
+- `--require-complete` with no `--ref` printed `PACKAGE: not-checked`, exit 0,
+  for an already-committed file: it constrains H2/H3 only.
+- This package is `SKILL.md` plus `scripts/commit-provenance.mjs`; it reads
   `complete` only when that repo-relative `--ref` is passed.
 - Commit `65fed42` staged exactly those two files. The pre-commit inspector, run
   artifact-only, printed `STAGED_SET_NOT_EXACT (extra:
-  scripts/commit-provenance.mjs)` and exited 1, although the staged set was
-  exactly the intended two paths and each file's H2 equalled its own H0. The
-  set was checked independently NUL-split and the post-commit run returned
-  `MATCH (h0=h1=h2=h3)`. `--expect-path` exists so that run reports the set
+  scripts/commit-provenance.mjs)` and exited 1, although the set was exactly
+  the intended paths and each H2 equalled its own H0. The set was checked
+  independently NUL-split; `--expect-path` exists so that run reports the set
   instead of a false failure.
 
 ### Reproduced 2026-10-26: one commit for a three-file package
@@ -456,6 +449,12 @@ Same repo, HEAD `663b2d6`, `shell-command-result-verification/` still untracked:
 - H0 = H1 = H2 = H3 is the proof; the commit's exit code is not.
 - An inspector edit is unproven until each documented flag changes a named
   output line in a paired run; `node --check` and `--help` alone prove nothing.
+- Drift after staging is cleared with `git restore --staged -- <rel>` before
+  anything else; never commit around a stale index entry.
+- Wait for a sustained quiet window before validating bytes a concurrent writer
+  is still changing; three quick identical reads are not stability.
+- Recover your validated blob from the object store to attribute hunks you did
+  not write, and cross-check a worktree-modified inspector against raw digests.
 - No config changes, amend, reset, force-push or push.
 
 ## Boundaries / non-claims
@@ -498,3 +497,5 @@ Same repo, HEAD `663b2d6`, `shell-command-result-verification/` still untracked:
   inspector for repo ownership, H0–H3, the equality chain, `TARGET_STAGED`,
   staged extras, missing expected paths, referenced-resource tracking and the
   verdict. `--help` prints usage.
+- [references/concurrent-writer-recovery.md](references/concurrent-writer-recovery.md)
+  — post-staging drift, quiescence, blob recovery, inspector trust, HEAD moves.
