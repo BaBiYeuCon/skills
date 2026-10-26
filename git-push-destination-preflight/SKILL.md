@@ -1,6 +1,6 @@
 ---
 name: git-push-destination-preflight
-description: Pre-push gate and post-push proof for git push. Use when asked to push a commit or branch; when a push failed with 403 / non-fast-forward / forced update / "Permission denied (publickey)"; when origin appeared or its URL/protocol/pushURL changed; when histories share no merge base; when push.followTags or remote.<name>.push may carry extra refs; when an account cannot push; or when naming a remote branch. Covers remote/pushURL re-reads, identity checks without secrets, merge-base and divergence counts, publish-set and visibility disclosure, branch-name collision checks at the push URL, one explicit src:dst push, exit code captured outside a pipeline, and ls-remote verification at the push URL with full object IDs, plus a read-only HTTPS probe when SSH auth fails. Stops with the exact blocker instead of retrying, force-pushing, adding remotes or changing credentials. Commit provenance: skill-artifact-commit-provenance; exit codes: shell-command-result-verification; key/credential lifecycle is out of scope.
+description: Pre-push gate and post-push proof for git push. Use when asked to push a commit or branch; when the commit the owner named is not the branch tip; when a push failed with 403 / non-fast-forward / forced update / "Permission denied (publickey)"; when origin appeared or its URL/protocol/pushURL changed; when histories share no merge base; when push.followTags or remote.<name>.push may carry extra refs; when an account cannot push; or naming a remote branch. Covers destination/identity re-reads, named-commit vs HEAD resolution, merge-base and divergence counts, publish-set and visibility disclosure, push-URL collision checks, one explicit src:dst push, exit-code capture, and ls-remote verification with full object IDs, plus a read-only HTTPS probe when SSH auth fails. Stops with the exact blocker instead of retrying, force-pushing, adding remotes or changing credentials. Commit provenance: skill-artifact-commit-provenance; exit codes: shell-command-result-verification; key/credential lifecycle is out of scope.
 ---
 
 # Git Push Destination Preflight
@@ -30,6 +30,8 @@ where it landed: query the push URL and compare full object IDs after it.
 - `push.followTags` is set, `remote.<name>.push` exists, or the remote has a
   pushURL that differs from its fetch URL.
 - Commit provenance just passed and the owner now asks to push.
+- The owner names a commit (SHA, short SHA, tag or subject) rather than a
+  branch, or `HEAD` has moved past the commit they named.
 
 ## Gate 0 - resolve the destination at push time
 
@@ -91,18 +93,18 @@ ssh -i ~/.ssh/<key> -o IdentitiesOnly=yes -o BatchMode=yes -T git@github.com; ec
   is identity inspection, not a secret read. Its `Git operations protocol`
   line describes gh's own integration, not the repository's remote.
 - Scopes are not permission. Measured: the denied account's token carried the
-  `repo` scope and still received 403. Scopes describe what a token may ask for,
-  not what an account may write to one repository.
+  `repo` scope and still received 403; a scope is an ask, not a write grant.
 - Run `ssh-add -l` only for an SSH destination. Exit 1 with "The agent has no
   identities" is a result, not a command failure. A listed key proves only that
   a key is loaded - not its account, whether GitHub has it, or whether that
   account can write. Several identities make the unpinned `ssh -T` ambiguous;
   pin the intended key with `-i ~/.ssh/<key> -o IdentitiesOnly=yes`.
 - `ssh -o BatchMode=yes -T git@github.com` maps an offered key to an account
-  without a passphrase prompt. Success prints `Hi <account>!` and exits 1;
-  exit 255 means no accepted key. Capture each probe's own status: exit 1 is a
-  pass, so `set -e` or a pipeline misreports it. It is read-only but contacts
-  GitHub and may add a host key to `known_hosts`.
+  without a passphrase prompt. Success prints `Hi <account>!` and exits 1; 255
+  is ssh's generic error (DNS, proxy, timeout, refused port), so only
+  `Permission denied (publickey)` on stderr means no accepted key; other 255
+  leaves identity `UNKNOWN`. Capture each probe's own status: exit 1 is a pass,
+  so `set -e` or a pipeline misreports it.
 - `gh auth status`, `gh api` and `ssh -T git@github.com` are GitHub-specific;
   on another host use its probe/API or report identity and permission `UNKNOWN`.
 - Never run `gh auth token`, never query the keychain
@@ -190,6 +192,7 @@ git status --short
   reachable on the remote, with author and subject. If the remote branch does
   not exist or has no merge base, use the `HEAD --not --remotes` form, state
   that the tracking refs may be stale, and name the base you compared against.
+- If the owner named a commit, resolve it with Gate 2b and use that commit here.
 - Keep the explicit `HEAD`. Measured 2026-10-26: `git log --not --remotes`
   alone returned empty with exit 0 while `git log HEAD --not --remotes` listed
   10 commits at 06:47 and 11 at 06:48, when another writer committed
@@ -209,9 +212,38 @@ git status --short
 - If the owner approved a commit set, a later commit on the same branch is a
   new publish set and needs a new confirmation.
 
+## Gate 2b - resolve the commit the owner named against HEAD
+
+An owner can name a commit instead of a branch; resolve it before Gate 2a's
+set, because the source ref decides what is published.
+
+```sh
+TARGET=<owner-named-commit>
+TARGET_SHA="$(git rev-parse --verify "$TARGET^{commit}")"; echo "target_rc=$?"
+git merge-base --is-ancestor "$TARGET_SHA" HEAD; echo "target_ancestor_rc=$?"
+git rev-parse HEAD; git rev-list --count "$TARGET_SHA"; git rev-list --count HEAD
+```
+
+- Report `TARGET_COMMIT` and `HEAD_AT_PUSH` as full SHAs with subjects. A tag
+  resolves to its commit, not the tag object. `target_rc` 128, or more than one
+  `git log --all --oneline --fixed-strings --grep=<subject>` match, is
+  ambiguous: stop and ask which commit.
+- Equal SHAs: Gate 2a's set stands. Ancestor exit 0 with a different SHA: the
+  target is already in `HEAD`'s history, so pushing the branch publishes it plus
+  every later commit. Push `"$TARGET_SHA:refs/heads/<branch>"` only after the
+  owner confirms that commit, and still disclose those later commits, with Gate
+  2a recomputed against `$TARGET_SHA`. A new branch is not isolation: it
+  publishes the target's whole ancestry.
+- Exit 1: the target is not in `HEAD`'s history; its own ancestry is the publish
+  set, and Gate 2 still decides whether any destination can take it. Exit 128 is
+  a measurement failure, not "unrelated". Resolving a target never bypasses
+  Gate 2's stop.
+- Measured 2026-10-26: the named `b34da4e` carries 17 commits, its child
+  `1e27035` (`HEAD`) 18; `target_ancestor_rc=0` and no push was attempted.
+
 ## Gate 3 - push once, on the named destination
 
-- Push only after Gates 0-2a and the permission check are green and the owner
+- Push only after Gates 0-2b and the permission check are green and the owner
   named the remote and branch, or confirmed the resolved ones. The owner's
   instruction authorizes one push of that ref; it does not authorize a retry or
   a different ref.
@@ -312,8 +344,7 @@ git ls-remote --heads "$PUSH_URL" "$BASE"
   verifies only the fetch URL.
 - Positive control: query the known base branch and require a ref. An empty
   candidate result proves nothing until the same command returns the control.
-- A successful push proves transfer only; it does not prove CI, review,
-  correctness or acceptance.
+- A successful push proves transfer only - not CI, review, correctness or acceptance.
 
 ## Failure triage
 
@@ -322,7 +353,7 @@ git ls-remote --heads "$PUSH_URL" "$BASE"
 | HTTPS `403` / `Permission ... denied to <account>` | The credential git sent lacks write access to this repo | Stop. Report URL, account, stderr, exit code. Offer a new branch on a writable remote, an owner-granted access change, or leaving the commit local. |
 | SSH `ERROR: Permission to <owner>/<repo> denied to <user>` | The key authenticated as `<user>`, who lacks write access | Stop. Report the user, URL, stderr, exit code. Do not switch gh accounts; the key's account is the identity. Offer a new branch on a writable remote, a granted access change, or leaving the commit local. |
 | `non-fast-forward`, `fetch first`, no merge base | Histories are unrelated or diverged | Stop. Show merge-base, left/right counts and roots. Never force. |
-| `Permission denied (publickey)` | SSH key or agent problem | Stop. Report `ssh-add -l` and the key state. Do not switch gh accounts, edit config or add keys. A public remote can still be read over its HTTPS URL for ref verification; that is a read-only probe, not an auth workaround. |
+| `Permission denied (publickey)` | SSH key or agent problem, named by this stderr rather than by 255 alone | Stop. Report `ssh-add -l` and the key state. Do not switch gh accounts, edit config or add keys. A public remote can still be read over its HTTPS URL for ref verification; that is a read-only probe, not an auth workaround. |
 | `repository not found`, `404` | Wrong URL, or no access to a private repo | Re-resolve the URL. Stop. |
 | `push` returned success but the remote ref is missing or has a different SHA | The transfer report is not a ref measurement | Stop. Re-measure with `ls-remote`; report `PUSHED_UNVERIFIED`, not `PUSHED`. |
 | `[new tag]` or an unrequested ref in the output | `push.followTags` or `remote.<name>.push` added refs | Stop. Report every ref carried; remove nothing without owner direction. |
@@ -345,8 +376,9 @@ an owner decision, not a default.
 
 ## Options to offer after a stop
 
-1. **New branch on a writable remote** - preserves the exact commit hash and
-   leaves the remote default branch untouched.
+1. **New branch on a writable remote** - preserves the exact commit hash,
+   publishes that commit's whole ancestry, and leaves the remote default branch
+   untouched.
 2. **Reconcile histories** - merge or rebase, then push; the commit hash changes
    and the previously proven commit no longer exists.
 3. **Leave the commit local** - report its hash, branch and worktree path.
@@ -365,6 +397,7 @@ IDENTITY_PATH: https (helper <...>, gh <account>) | ssh (agent <n identities>)
 IDENTITY: <sending account|unknown> | key account <name|unknown>
 PERMISSION: <push true|false|unknown> for <account> | VISIBILITY: <public|private|unknown>
 HISTORY: merge-base <sha|none> (exit <n>) | left/right <remote>/<local> | roots <sha>/<sha>
+TARGET_COMMIT: <full sha and subject | none named> | HEAD_AT_PUSH: <full sha> | target ancestor of HEAD: <yes|no|unknown>
 PUBLISH_SET: <n commits; authors; non-task commits disclosed>
 PUSH_URL: <url> | same as fetch URL
 COMMAND: <exact push command, or not-attempted>
@@ -378,52 +411,12 @@ PROOF: <remote sha> = <validated commit sha> | differs | forced | not-measured
 VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<reason>) | LEFT_LOCAL
 ```
 
-## Measured case (2026-10-25/26, ~/.qoder/skills)
+## Measured cases
 
-- Commit `663b2d6` was proven locally (H0=H1=H2=H3) before the push request.
-- The push turn began 06:16:34; its first `git remote -v` was empty (exit 0).
-  `origin` appeared with `.git/config` mtime 06:16:47 and was fetched at
-  06:16:55; the commit was created 06:16:11. The mtime dates the write, not the
-  author.
-- The push to `https://github.com/khoi/skills.git` was denied
-  `Permission ... denied to BaBiYeuCon`, 403, exit 128. No `ls-remote` snapshot
-  preceded the attempt, so "no refs updated" is inferred from the rejection,
-  not measured. Later read-only HTTPS queries returned `main 8a6423f`, no
-  `local-skills-2026-10-26` branch, and the `main` control returned a ref.
-- Histories: left/right `15 4` at the push request, `15 10` at 06:47; no merge
-  base; roots `30a826a` (remote) / `91d6051` (local).
-- The "switch account" request at 06:21:18: only `BaBiYeuCon` was
-  authenticated, helper `osxkeychain`, no SSH identities at that turn, no
-  second account. No credential or config change was made by this gate.
-- Re-measured 2026-10-26 06:47: `origin` and its push URL are
-  `git@github.com:khoi/skills.git` (SSH), config mtime 06:23:01, no upstream
-  (`@{u}` exit 128), no URL rewrite, `push.followTags` unset,
-  `remote.origin.push` unset. `gh auth status` still names `BaBiYeuCon`
-  (HTTPS preference) with the `repo` scope; `gh api` returns `push:false`,
-  `private:false`, `visibility:public`. One ED25519 key
-  `qoder-skills-2026-10-26` is loaded, so the unpinned probe was unambiguous;
-  `ssh -o BatchMode=yes -T git@github.com` prints `Permission denied
-  (publickey)` and exits 255. Fetch and push URL matched, so the slug/host
-  rules were preventive, not measured.
-- Local `main` moved from `663b2d6` (06:16:11) through `65fed42` (06:29:52),
-  `c7c5db6` (06:43:42) and `9d47ba4` (06:46:59) to `a839af7` (06:49:15); the
-  remote head stayed `8a6423f`. The writers after the task were not measured;
-  the destination changed after the push turn. Re-measure everything on every
-  run.
-- `git log --not --remotes` returned empty with exit 0 while
-  `git log HEAD --not --remotes` listed 10 commits at 06:47, 11 at 06:48 and
-  12 at 06:50 - the positive-revision form is required.
-- Exit-code trap measured in the same session: the first SSH `ls-remote`
-  printed `ls_remote_exit=0` beside a fatal error; re-running the command alone
-  returned 128. Capture the command's own status, not a pipeline's.
-- Post-push and ref-set proof measured 2026-10-26 in throwaway repos (git
-  2.55.0), never against `khoi/skills`: `push.followTags=true` added
-  `* [new tag] vA -> vA` to an explicit single-refspec push, and
-  `--no-follow-tags` kept the next tag local; with `pushurl` = `B.git` and
-  fetch URL `A.git`, the push landed in B, local `origin/main` updated to the
-  pushed SHA, `git ls-remote origin` returned empty with exit 0, and A had no
-  such branch; `--dry-run` left the remote SHA unchanged; `git push | tail`
-  printed `push_exit=0` while the same rejected push exited 1 without the pipe.
+[references/measured-push-cases.md](references/measured-push-cases.md) holds
+both runs with commands and readings: `663b2d6` (403, no merge base `15 4` ->
+`15 10`, roots `30a826a`/`91d6051`, exit-code traps) and `b34da4e` (named
+commit behind `HEAD`, 17 vs 18). Both ended blocked; neither proves a push.
 
 ## Hard rules
 
@@ -447,6 +440,10 @@ VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<
 - One push attempt. A failure produces a report, not a retry.
 - List the publish set and every author before pushing. Stop if any commit is
   not part of the approved task.
+- Resolve the commit the owner named to a full SHA and compare it with `HEAD`
+  before computing the publish set; a commit is not a branch tip.
+- A push publishes the source ref's whole ancestry: a branch or commit at `C`
+  carries every ancestor of `C`, never `C` alone.
 - Check a new branch name is free before pushing; never overwrite an existing
   remote ref.
 - An explicit refspec is not a ref-set guarantee; read `push.followTags` and
@@ -455,8 +452,9 @@ VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<
 - Verify the pushed ref at the push URL with `ls-remote`, comparing full object
   IDs; `refs/remotes/...` is a cache, not proof.
 - Capture the push's and each probe's own exit code outside any pipeline;
-  `ssh-add -l` and `ssh -T` exit 1 are valid results. A forced update is not a
-  proven push of the commit you validated.
+  `ssh-add -l` and `ssh -T` exit 1 are valid results; a bare `ssh` 255 is a
+  probe failure, not "no key", unless stderr says `Permission denied
+  (publickey)`. A forced update is not a proven push of the commit you validated.
 - Never generate or install credentials or keys from this gate; that is a
   separate explicit owner task.
 - Never add or edit remotes, change credentials or git config, or alter refs on
@@ -497,6 +495,7 @@ VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<
 
 ## Resources
 
-None. No bundled scripts or references: the gate is a short sequence of
-read-only `git`/`gh` measurements plus a stop decision, and a push helper would
-add a write-capable surface this skill exists to prevent.
+- [references/measured-push-cases.md](references/measured-push-cases.md) - the
+  measured runs, commands and exit codes.
+- No bundled scripts: the gate is read-only `git`/`gh` measurements plus a stop
+  decision; a push helper would add a write-capable surface this skill prevents.
