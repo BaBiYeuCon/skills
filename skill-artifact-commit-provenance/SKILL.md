@@ -98,6 +98,13 @@ line answers neither.
 
 5. **Stage exactly the expected paths, then verify the staged set.**
 
+   Preflight the index before the first `git add`: `git -C <root> diff --cached
+   --name-only -z | tr '\0' '\n'` must print nothing. Staged paths there belong
+   to another session or an earlier task; `git add` keeps them and your commit
+   would carry them. Stop and name them — never unstage, restore or reset them.
+   A resumed run whose index holds exactly the expected set with each H2 equal
+   to that file's own H0 is the only exception.
+
    ```
    git -C <root> add -- <repo-relative-path> [<companion>...]
    git -C <root> diff --cached --name-only -z | tr '\0' '\n' | LC_ALL=C sort
@@ -223,6 +230,13 @@ is present, and returns `CHAIN_BROKEN` — never `MATCH`. Run it before staging
 (records H1), after staging (H2 appears), after commit (H3 appears; a later
 run's H1 is H4). Read the verdict, not just the exit code.
 
+With `--require-complete`, exit 4 `CHAIN_INCOMPLETE (head absent)` is the
+expected post-staging, pre-commit state: `CHAIN: … h2=h3 head-absent`,
+`STAGED_OK: yes`, and H0 = H1 = H2 per file. An exact staged set plus that
+chain means proceed to commit — the proof is the post-commit
+`MATCH (h0=h1=h2=h3)`. Exit 4 that names `index`, or arrives with `STAGED_OK:
+no` or a `differ`, is not that state: stop.
+
 The digests prove content bytes only. A `.gitattributes` filter such as Git
 LFS makes the stored blob (a pointer) differ from the worktree content, and a
 file-mode-only change leaves every digest equal; neither is detected. A
@@ -339,6 +353,8 @@ The inspector's `VERDICT` is mechanical; the report's is a conclusion. Map them
 explicitly: `MATCH (h0=h1=h2=h3)` under `--require-complete` →
 `COMMITTED_PROVEN`; `MEASURED_ONLY` or a pending index/head → `MESSAGE_ONLY`;
 `DRIFT`, `STAGED_SET_NOT_EXACT` or `CHAIN_BROKEN` → `BLOCKED` naming the stage.
+A pre-commit `CHAIN_INCOMPLETE (head absent)` becomes `MESSAGE_ONLY` only if
+the commit is never made; while the workflow runs it is not a verdict.
 `PACKAGE` is never `not-checked` in a report: pass `--ref` for each enumerated
 resource, or `--refs-none` when the enumeration returned none. `--expect-path`
 checks membership in the staged set, not the companion's bytes: run the
@@ -350,73 +366,12 @@ was staged. After the commit the index is clean, so a post-commit run prints
 `STAGED_EXTRA: none` trivially and `STAGED_MISSING: not-checked`; those are not
 set proof.
 
-## Measured case (2026-10-25, re-measured 2026-10-26)
+## Measured cases
 
-Artifact: `~/.qoder/skills/session-sourced-skill-distillation/SKILL.md`.
-
-- No repo enclosed the skills directory (`git rev-parse` exited 128), the open
-  workspace repo forbade commits, and the agent stopped instead of running
-  `git init`; the owner then chose to initialise one. Identity resolved (BBYC);
-  no config changed.
-- The pre-commit re-hash expected `b98dbba…` but found `2136534…` (191 → 212
-  lines). The agent re-read the whole file, confirmed its two edits survived,
-  and ran the newly referenced citation checker (`VERDICT: OK`,
-  `citations: 0`) before committing.
-- Commit `91d6051`: 1 file, 212 insertions, worktree digest equal to
-  `git show HEAD:…`; 34 sibling directories stayed untracked, and the referenced
-  `session-sourced-skill-distillation/scripts/check_skill_overlap.mjs` remains
-  untracked — the commit is proven while the package is partial.
-- The drift-time re-validation is the cautionary part: duplicate-heading and
-  citation checks were visible, but a full package check after the 212-line
-  edit was not. Re-run everything.
-- These counts drift. Re-measure them on every run.
-
-### Reproduced 2026-10-26: pathspec base and set checks
-
-- From inside `shell-command-result-verification/`, `git status --porcelain`
-  with that directory as the pathspec printed nothing, exit 0 — identical to an
-  invented pathspec. From the repo root, `status -uall` named its three files;
-  without `-uall` only `?? <dir>/`.
-- `--require-complete` with no `--ref` printed `PACKAGE: not-checked`, exit 0,
-  for an already-committed file: it constrains H2/H3 only.
-- This package is `SKILL.md` plus `scripts/commit-provenance.mjs`; it reads
-  `complete` only when that repo-relative `--ref` is passed.
-- Commit `65fed42` staged exactly those two files. The pre-commit inspector, run
-  artifact-only, printed `STAGED_SET_NOT_EXACT (extra:
-  scripts/commit-provenance.mjs)` and exited 1, although the set was exactly
-  the intended paths and each H2 equalled its own H0. The set was checked
-  independently NUL-split; `--expect-path` exists so that run reports the set
-  instead of a false failure.
-
-### Reproduced 2026-10-26: one commit for a three-file package
-
-`~/.qoder/skills/owner-approval-hash-binding/` was committed as one package:
-`SKILL.md` plus
-`owner-approval-hash-binding/references/approval-record-and-delivery.md` and
-`owner-approval-hash-binding/scripts/check_owner_approval.mjs`.
-
-- Three independent H0s were recorded after the package's validation run:
-  `bbffe25d…` (`SKILL.md`), `1c910c67…` (reference), `a711674a…` (script). No
-  single digest stood for the package.
-- Before staging, the inspector printed `MEASURED_ONLY` — a measurement, not a
-  proof, because no `--expect` had been supplied yet.
-- One commit carried exactly those three paths, checked NUL-split. The run
-  predates `--expect-path`, so the set was proven independently of the
-  inspector rather than by it.
-- After the commit, three inspector runs — one per file, each with its own
-  `--expect` — printed `MATCH (h0=h1=h2=h3)`. `SKILL.md` passed both of its
-  `--ref` resources and read `PACKAGE: complete`; the reference and the script
-  passed `--refs-none` and read `complete (0 referenced resources)`. One run
-  could not have covered the package.
-- `--require-complete` was passed on those runs but leaves no output trace once
-  H2 and H3 exist: it is a gate on missing stages, not a report line. Do not
-  cite it as evidence of anything the output does not show.
-- The repo's recursive counts moved `TRACKED_FILES` 4 → 7 and
-  `UNTRACKED_FILES` 120 → 117 across the commit.
-- Re-measured 2026-10-26: all three worktree files still hash to those H0
-  values, and `git diff b81a6a3..HEAD -- owner-approval-hash-binding` is empty.
-  HEAD moved twice during the check (`c7c5db6` → `9d47ba4`); the commit proof
-  survives later commits, the counts and HEAD do not.
+The measured runs behind this skill ground the rules above; their digests,
+counts and headings live in
+[references/measured-cases.md](references/measured-cases.md). Counts drift, so
+re-measure them on every run.
 
 ## Hard rules
 
@@ -439,6 +394,9 @@ Artifact: `~/.qoder/skills/session-sourced-skill-distillation/SKILL.md`.
   commit.
 - Stage exact paths only, then verify the staged set against the expected paths;
   name each approved companion with `--expect-path`.
+- Preflight the index before the first `git add`; a non-empty index that is not
+  your own resumed expected set stops the commit, and never unstage another
+  writer's paths.
 - `--expect-path` proves set membership; each committed file still needs its own
   H0 = H1 = H2 = H3 chain.
 - A first commit carrying concurrent content must name it.
@@ -499,3 +457,5 @@ Artifact: `~/.qoder/skills/session-sourced-skill-distillation/SKILL.md`.
   verdict. `--help` prints usage.
 - [references/concurrent-writer-recovery.md](references/concurrent-writer-recovery.md)
   — post-staging drift, quiescence, blob recovery, inspector trust, HEAD moves.
+- [references/measured-cases.md](references/measured-cases.md) — the runs behind
+  these rules: digests, counts and what each run did and did not prove.
