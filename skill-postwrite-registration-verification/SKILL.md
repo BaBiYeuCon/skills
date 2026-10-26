@@ -1,6 +1,6 @@
 ---
 name: skill-postwrite-registration-verification
-description: Verify a newly written or updated Skill before reporting it available. Use after editing SKILL.md or resources, when asked to execute /skills reload or confirm registration, or when skill-creator step 6 is the only closing guidance. Preserve a package baseline, check approved-file scope, recursively validate package Markdown links and anchors, separate citation structure from meaning, test authorized commands with positive and negative controls, load the exact name through the Skill tool, then compare the complete file set and hashes again. Distinguish in-app slash commands from shell probes and report validation gaps without silently changing unrelated resources.
+description: Verify a newly written or updated Skill before reporting it available. Use after editing SKILL.md or resources, when asked to execute /skills reload or confirm registration, or when skill-creator step 6 is the only closing guidance. Preserve a package baseline, pin the shared checker identity in that baseline, check approved-file scope, recursively validate package Markdown links and anchors, separate citation structure from meaning, test authorized commands with positive and negative controls, load the exact name through the Skill tool, then compare the complete file set and hashes again. Distinguish in-app slash commands from shell probes and report validation gaps without silently changing unrelated resources.
 ---
 
 # Skill Post-Write Registration Verification
@@ -26,9 +26,14 @@ unexecuted check and known limitation.
 Record the approved target and exact relative paths allowed to change. Before
 editing, preserve the package in an authorized temporary directory outside the
 package, with its timestamp, complete sorted file list and SHA-256 per file.
+In a separate section of the same baseline, record the identity of each shared
+checker under Resources that the workflow will invoke (`check_skill.mjs`,
+`check_citations.mjs`): absolute path, SHA-256 and mtime. They are not package
+files, so record their identity without copying them into the package.
 Keep the baseline immutable; do not re-snapshot it to hide drift. If verification
 starts after writing and no earlier baseline exists, report scope preservation
-as NOT CONFIRMED rather than reconstructing one.
+as NOT CONFIRMED rather than reconstructing one, and report checker drift as
+UNVERIFIED; a current hash plus mtime is identity, not a before/after comparison.
 
 Compare added, modified and deleted paths against that baseline after editing.
 Require every difference to be approved and every untouched file to retain its
@@ -104,11 +109,83 @@ be recorded separately but cannot replace execution evidence; even an import may
 have side effects, so inspect it first. Report those commands as documented, not
 executed. A clean package check proves nothing about command execution.
 
+### Fixture-location preflight
+
+Before any fixture allocation or write, record an explicitly authorized external
+workspace and the actual parent used by the generator. Never derive it from the
+inspected package, its ancestors, cwd, or an unchecked script location. Keep the
+same workspace when switching from a staged package to an installed package.
+
+Set `APPROVED_WORK`, `FIXTURE_DIR`, `SKILLS_ROOT` and `PACKAGE_DIR` to explicit
+absolute paths: the existing authorized workspace, a fresh fixture directory,
+the installed Skill tree and the currently inspected package. Authorization comes
+from the user, not these variables. Run this read-only gate before allocation:
+
+```sh
+python3 - "$APPROVED_WORK" "$FIXTURE_DIR" "$SKILLS_ROOT" "$PACKAGE_DIR" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+if len(sys.argv) != 5 or any(not Path(p).is_absolute() for p in sys.argv[1:]):
+    print("USAGE: absolute WORK FIXTURE SKILLS PACKAGE paths required")
+    raise SystemExit(2)
+try:
+    work, skills, package = [Path(sys.argv[i]).resolve(strict=True) for i in (1, 3, 4)]
+    proposed = Path(sys.argv[2])
+    parent = proposed.parent.resolve(strict=True)
+    fixture = proposed.resolve()
+    protected = (skills, package)
+    if not all(p.is_dir() for p in (work, skills, package, parent)):
+        raise ValueError("roots and fixture parent must be existing directories")
+    if any(work == p or p in work.parents for p in protected):
+        raise ValueError("workspace is inside a protected root")
+    if work not in fixture.parents:
+        raise ValueError("fixture is not a strict child of the authorized workspace")
+    if any(fixture == p or p in fixture.parents or fixture in p.parents for p in protected):
+        raise ValueError("fixture overlaps a protected root")
+    if proposed.exists() or proposed.is_symlink():
+        raise ValueError("fixture path must be fresh")
+except (OSError, RuntimeError, ValueError) as error:
+    print("E_FIXTURE_LOCATION", str(error))
+    raise SystemExit(1)
+print("FIXTURE_LOCATION_OK", json.dumps({"work": str(work), "fixture": str(fixture),
+      "skills": str(skills), "package": str(package)}))
+PY
+```
+
+Require exit 0 and `FIXTURE_LOCATION_OK`; use the returned canonical fixture path
+for the generator, not a separately recomputed parent. Allocate exclusively, then
+verify the actual directory resolves to that path before writing fixture files.
+Repeat if paths change. This detects placement mistakes; it is not a race-proof
+filesystem sandbox. Keep validators and logs outside both protected roots too.
+
+If a run misplaced fixtures, stop and retain its command, actual paths and result
+as a scope violation even if functional checks passed. Inventory affected paths;
+remove only attributable run-owned fixtures within the cleanup authorization,
+never a wildcard over the Skill tree. For uncertain ownership, stop and ask.
+Verify the exact paths are gone, compare the package against its baseline, fix
+the anchor and rerun both package-location cases before reporting completion.
+Cleanup alone does not validate the original run or erase the incident.
+
 ## Pass 3 - controls
 
 A check that returns nothing (`0`, no lines, exit 1 with empty output) is not
 evidence until the same predicate fires where it must:
 
+- Start with the checker's own control:
+  `node /Users/khoi/.qoder/skills/verify-skill-source-session/scripts/check_skill.mjs --self-test`.
+  Require exit 0 and
+  `SELFTEST: PASS assertions=20 fires=20 dead=0 green=OK fixtures_removed=true`.
+  It builds throwaway fixtures in the system temp directory and removes them;
+  it proves the checker's assertions fire, not that this package is correct,
+  and it does not replace the known-good sibling, nested-resource/anchor or
+  scope-drift controls below. Any `DEAD` line or non-zero exit is a checker or
+  harness defect: report it and stop before those controls. A different
+  `assertions=` count means the shared checker changed; reconcile it with the
+  baseline checker hash instead of accepting the new count silently. The script
+  exits 0 even when a fixture directory survives, so treat
+  `fixtures_removed=false` as a leak.
 - On a deliberately broken copy (bad `name`, dangling link), the checker must
   print `VERDICT: PROBLEM` and exit non-zero.
 - On a known-good sibling skill it must print `VERDICT: OK`.
@@ -117,6 +194,13 @@ evidence until the same predicate fires where it must:
 - Against throwaway copies, require the scope check to detect an unapproved
   modification, addition and deletion. Require the final comparison to reject a
   late edit or a changed file set, not just match hashes for surviving paths.
+- Run the fixture preflight and generator with both staged and installed package
+  inputs, holding the authorized workspace fixed. Require a fresh child to pass,
+  record the actual allocation, then verify cleanup and protected-package hashes.
+- Require non-zero rejection before allocation for an outside path, a sibling
+  with the workspace's name prefix, a path inside either protected root, and a
+  symlink escape. Create test symlinks only in the authorized workspace; never
+  write a negative fixture at the rejected destination. Report unexecuted cases.
 
 Print expected and actual status plus a meaningful output signal per command.
 Keep intentional non-zero controls distinct from unexpected failures. Use the
@@ -124,9 +208,12 @@ existing `shell-command-result-verification` workflow rather than inventing a
 second exit-status convention.
 
 After the disk passes, save the complete validated file list and SHA-256 map,
-plus the shared checker versions used. Require no unexplained drift during the
-checks; a file edited after its check needs revalidation. Keep this validated
-map separate from the pre-edit baseline.
+plus the path, SHA-256 and mtime of each shared checker that produced a verdict.
+Bind each verdict to the checker hash that produced it. Require no unexplained
+drift during the checks: a file edited after its check, or a checker whose hash
+differs from the baseline or from the hash used for a verdict, needs the
+affected checks re-run and both identities reported. Keep this validated map
+separate from the pre-edit baseline.
 
 ## Pass 4 - registration (the one commonly missing)
 
@@ -156,8 +243,12 @@ the validated map: require identical relative file sets and matching hashes for
 every entry. Repeat the approved-scope comparison against the original baseline.
 If either differs, preserve the evidence, identify the drift, revalidate the
 affected content and retry loading; never overwrite the other writer's work or
-relabel the old checks as current. Recheck shared checker hashes too if they
-changed during validation.
+relabel the old checks as current. Recompute the shared checker hashes and
+compare them with the baseline identity: equal means no checker drift during
+this run; different means the verdicts belong to the superseded checker, so
+revalidate the affected checks and report both identities. Without a baseline
+checker hash, mtime alone does not establish "unchanged" - record the current
+identity and label drift UNVERIFIED.
 
 A matching disk map proves observed disk identity at those times, not a hash of
 the runtime's in-memory body or absence of all intervening writes. Report body
@@ -198,6 +289,9 @@ command -v qoder qoder-cli || echo NO_CLI_COMMAND
 - Empty or zero results require a control before they count.
 - Preserve both baseline and validation maps; neither is permission to expand
   the approved edit set or rewrite unrelated historical citations.
+- A checker hash measured only after validation is current identity, not proof
+  of continuity. Compare it with the baseline hash; without one, label checker
+  drift UNVERIFIED and never write "unchanged" from mtime.
 - Report incomplete checks and semantic caveats separately from registration.
   Do not call partial traversal recursive validation of the whole package.
 
@@ -210,10 +304,12 @@ PACKAGE      <observed verdict>
 RESOURCES    files=<N> links=<N> anchors=<N>; excluded/unchecked=<items>
 CITATIONS    structure=<result, measured count>; meaning=<verified/stale/unread>
 COMMANDS     <exact invocation and cwd> -> expected=<code> actual=<code> signal=<text>
+FIXTURES     authorized=<resolved root>; actual=<paths>; staged/installed=<results>; escapes=<rejected/unchecked>; cleanup=<verified/residual>; prior violation=<none/details>
 NOT EXECUTED <command and reason, or none>
-CONTROLS     <positive and intentional-negative results; unexpected failures>
+SELFTEST     assertions=<N> fires=<N> dead=<N> green=<OK/FAIL> fixtures_removed=<true/false> exit=<code>
+CONTROLS     <package-specific positive and intentional-negative results; unexpected failures>
 REGISTRATION <launch output>; revised body=<confirmed/not confirmed>
-POST-LOAD    file set=<match/drift>; hashes=<N/N>; checker versions=<identity>
+POST-LOAD    file set=<match/drift>; hashes=<N/N>; checker=<name:sha256@mtime>; checker drift=<none/measured/UNVERIFIED>
 LIMITATIONS  <remaining caveats, or none>
 VERDICT      <verified update | registered with limitations | not confirmed>
 ```
