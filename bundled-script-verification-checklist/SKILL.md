@@ -99,7 +99,10 @@ cd "$FIX" && node scripts/<script>.mjs <documented arguments>
   shipped resource and changes later package-check, inventory and link results.
 - Do not rewrite the documented command to an absolute path to make it work:
   the symlink exists so the literal relative command stays the thing under test.
-- Keep the generator and its output under the temp root, and report both paths.
+- Keep the generator and its output under the temp root for the run, but copy
+  the generator (or the literal fixture files) into the run's evidence notes
+  outside the package before cleanup: a temp path is not preservation. Report
+  the temp path and the preserved location.
 - Run the command under both path spellings, relative and symlinked absolute, to
   catch Gate 2b.
 
@@ -149,6 +152,32 @@ assets/: `--check-refs` treats every such inline-code path in the file as a
 bundled resource that must exist in the checked package. `--self-test` covers
 the checker's assertions; the throwaway package proves the invoked mode can
 reject something. The checker owns the package rules; do not restate them here.
+
+### Reusing a control result recorded earlier
+
+A control output from an earlier turn — or from the source session that prompted
+the edit — is evidence about the checker and the input that produced it, not
+about the checker on disk now. Reuse it only when both are still reproducible.
+
+- Record one SHA-256 for the checker revision that produced the
+  control/discriminator pair, and re-hash it before citing either result. Re-run
+  the pair when the digest moved: the recorded verdicts then belong to a
+  different tool.
+- Preserve the input with the digest: the literal fixture files — for this
+  checker, the two `SKILL.md` packages — or a generator that recreates them
+  byte-for-byte, in the run notes. A reported `/tmp` or `$TMPDIR` path is not
+  preservation; check it with `test -e` before quoting the result. If it no
+  longer resolves, the result is a quote, not a control — rebuild from the
+  preserved source and re-run, or label the old output unverified.
+- Keep the digest and the fixture source in the run notes, not in this file:
+  either written here outlives the run that produced it and lets a later run
+  cite an old verdict as current.
+
+Measured 2026-10-26: a source session's control output was reusable only because
+`check_skill.mjs` still hashed to the digest recorded in that session (the same
+digest was re-checked after the edit) and the two ghost packages could be
+recreated in a fresh temp root from the properties the record enumerated,
+reproducing the recorded 1 and 2 problem lines.
 
 | Branch | How to force it | Required behavior |
 |---|---|---|
@@ -213,6 +242,7 @@ allocation or write.
 | `CHECK_EXIT=0` on the only checker run, whose output went through `tail`/`head` | The code was the filter's. Re-run with `> out/check.txt 2>&1` and `code=$?`, then require a throwaway package built to fail to exit 1 **and** name the missing ref in its problem line before citing `VERDICT: OK` |
 | Known-failing control prints `VERDICT: OK` with exit 0 | `--check-refs` is opt-in and was left off — the same package fails only when the flag is given; re-run with it before concluding the checker accepts the package |
 | Known-failing control exits 1 but prints more than the one expected problem line | The fixture fails on its own (name/folder mismatch, folded description, stray root file), so the exit code is unattributable to the ref check; fix the fixture, keep the ref, re-run |
+| Control output cited with a matching checker digest but only a temp path, and `test -e` on that path fails | The input is gone, so the result is a quote, not a control; rebuild the fixtures from the preserved source and re-run, or label the old output unverified |
 
 ## Boundaries
 
