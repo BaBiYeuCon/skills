@@ -44,11 +44,9 @@ stat -f '%Sm %N' .git/config 2>/dev/null || stat -c '%y %n' .git/config
 git rev-parse --abbrev-ref --symbolic-full-name '@{u}'
 ```
 
-- An empty `git remote -v` is not proof there is no destination. Measured: it
-  was empty with exit 0 at 06:16:34, `origin` appeared with a `.git/config`
-  mtime of 06:16:47 and was fetched at 06:16:55, and the push then targeted
-  that URL. The mtime dates the write, not its author. Re-run after any
-  failure and read `.git/config` directly.
+- An empty `git remote -v` is not proof there is no destination. Measured: empty
+  with exit 0 at 06:16:34, `origin` present at 06:16:47 and fetched at 06:16:55;
+  the mtime dates the write, not its author. Re-run and read `.git/config`.
 - Read URL and pushURL. They can differ; a push uses the push URL. Capture it
   once and use it for every remote measurement in Gates 3 and 4:
 
@@ -68,9 +66,8 @@ git rev-parse --abbrev-ref --symbolic-full-name '@{u}'
 - A remote can change between turns. Measured here: HTTPS at the failed push,
   SSH at a later measurement (config mtime 06:23:01). Never reuse an earlier
   URL or protocol.
-- Capture the exact destination string and branch mapping in the report.
-  Transcript tool entries do not preserve command arguments, so quote the
-  command you are about to run.
+- Capture the exact destination and branch mapping in the report; transcript
+  entries lose command arguments, so quote the command you will run.
 
 Do not add, rename, edit or delete a remote on your own. If one appeared
 mid-task, report its `.git/config` mtime and say the author is unattributed;
@@ -84,25 +81,30 @@ gh auth status
 git config --show-origin --get-all credential.helper
 
 # SSH destination
-ssh-add -l
-ssh -o BatchMode=yes -T git@github.com   # contacts GitHub; may update known_hosts
+ssh-add -l; echo "ssh_add_exit=$?"        # 0 = keys listed, 1 = no identities
+ssh -o BatchMode=yes -T git@github.com; echo "ssh_t_exit=$?"   # 1 = authenticated
+# several identities loaded: pin the intended key
+ssh -i ~/.ssh/<key> -o IdentitiesOnly=yes -o BatchMode=yes -T git@github.com; echo "ssh_t_exit=$?"
 ```
 
 - `gh auth status` reports the active account, scopes and a masked token. That
   is identity inspection, not a secret read. Its `Git operations protocol`
   line describes gh's own integration, not the repository's remote.
 - Scopes are not permission. Measured: the denied account's token carried the
-  `repo` scope and still received 403. Scopes describe what a token may ask
-  for, not what an account may write to one repository; only the `permissions`
-  probe or the push result speaks to write access.
+  `repo` scope and still received 403. Scopes describe what a token may ask for,
+  not what an account may write to one repository.
 - Run `ssh-add -l` only for an SSH destination. Exit 1 with "The agent has no
   identities" is a result, not a command failure. A listed key proves only that
-  a key is loaded - not which account owns it, whether GitHub has it, or
-  whether that account can write.
+  a key is loaded - not its account, whether GitHub has it, or whether that
+  account can write. Several identities make the unpinned `ssh -T` ambiguous;
+  pin the intended key with `-i ~/.ssh/<key> -o IdentitiesOnly=yes`.
 - `ssh -o BatchMode=yes -T git@github.com` maps an offered key to an account
   without a passphrase prompt. Success prints `Hi <account>!` and exits 1;
-  exit 255 means no accepted key. It is a read-only probe, but it contacts
+  exit 255 means no accepted key. Capture each probe's own status: exit 1 is a
+  pass, so `set -e` or a pipeline misreports it. It is read-only but contacts
   GitHub and may add a host key to `known_hosts`.
+- `gh auth status`, `gh api` and `ssh -T git@github.com` are GitHub-specific;
+  on another host use its probe/API or report identity and permission `UNKNOWN`.
 - Never run `gh auth token`, never query the keychain
   (`security find-internet-password` or equivalents), never print, request or
   accept a token in chat, and never change the credential helper.
@@ -123,6 +125,9 @@ ssh -o BatchMode=yes -T git@github.com   # contacts GitHub; may update known_hos
   gh api repos/<owner>/<repo> \
     --jq '{push: .permissions.push, private: .private, visibility: .visibility}'
   ```
+
+  Resolve `<owner>/<repo>` from `PUSH_URL`, not `remote.<name>.url`, and print
+  it beside the URL; a fetch-URL slug names the other repo when `pushurl` differs.
 
   - HTTPS: `gh api` reports the `gh` account; git sends whatever the helper
     returns (`gh auth setup-git` matches, `osxkeychain` can differ). When they
@@ -157,18 +162,16 @@ git reflog show --date=iso "$UP"
 
 - Empty merge-base with exit 1 means no common ancestor. Exit 128 with a fatal
   message means the ref is missing or unreadable - a measurement failure, not
-  an unrelated-history result. Measured: left/right `15 4` at the push request
-  and `15 10` at 06:47, roots `30a826a` (remote) and `91d6051` (local). A
-  plain push is non-fast-forward; a force-push would overwrite 15 remote
-  commits.
+  an unrelated-history result. Measured: left/right `15 4`, then `15 10` at
+  06:47, roots `30a826a`/`91d6051`; a plain push is non-fast-forward and a
+  force-push would overwrite 15 remote commits.
 - A remote-tracking ref can be stale. Its reflog date is the measurement.
   `git fetch <remote> <branch>` refreshes it but mutates local remote-tracking
   refs, so classify the fetch and run it only against a confirmed remote.
-- Both ancestor checks exiting 1 alongside an empty merge base is unrelated
-  history; an exit 0 means fast-forward is possible in that direction - report
-  which. A merge base with both checks exiting 1 is divergence; both cases
-  forbid a plain and a force push. An empty result needs a control:
-  `git merge-base HEAD HEAD` returns a commit hash.
+- Both ancestor checks exiting 1 with an empty merge base is unrelated history;
+  an exit 0 means fast-forward is possible that way - report which. A merge
+  base with both checks exiting 1 is divergence; both forbid a plain and a force
+  push. An empty result needs the control `git merge-base HEAD HEAD`.
 - No merge base blocks a plain and a force push to that existing remote
   branch; never substitute `--force`, `--force-with-lease`, ref deletion or a
   branch rename. A new branch is a different destination, not a workaround: it
@@ -245,9 +248,8 @@ git status --short
   No `--force`, no `--force-with-lease`, no tags or other refs unless asked,
   and no `-u` unless the tracking decision was made. `push.autosetupremote`
   can set an upstream without `-u`; check it and report any tracking change.
-- Rehearse with `--dry-run` when the ref set is uncertain: measured, it wrote
-  nothing - the remote SHA was identical before and after - and it still printed
-  the extra refs the real push would carry. A rehearsal is not proof.
+- Rehearse with `--dry-run`: measured, it left the remote SHA unchanged and
+  still printed the extra refs the real push would carry; it is not proof.
 - Snapshot the remote heads and the local cache before and after:
 
   ```sh
@@ -294,10 +296,8 @@ git ls-remote --heads "$PUSH_URL" "$BASE"
   `ls-remote` reading.
 - `refs/remotes/<remote>/<branch>` is a local cache. A failed push can leave it
   stale; a successful push may update it, but the remote query is authoritative.
-  Report `REMOTE_REF` from `ls-remote`, not from `for-each-ref`. Measured: with
-  `pushurl` naming a second repository, the push updated local `origin/main` to
-  the pushed SHA while the fetch URL had no such branch - that ref was never
-  evidence about the repository the fetch URL names.
+  Report `REMOTE_REF` from `ls-remote`, not `for-each-ref`. Measured: a second
+  `pushurl` moved local `origin/main` while the fetch URL had no such branch.
 - If SSH auth blocks `ls-remote`, query the public HTTPS URL directly for a
   read-only check:
 
@@ -307,8 +307,9 @@ git ls-remote --heads "$PUSH_URL" "$BASE"
 
   Do not change `origin`, the credential helper or the protocol just to verify.
   If the repo is private or the query fails, report `UNVERIFIED` instead of
-  `PUSHED`. That URL must name the same repository as the push URL; when they
-  differ it verifies only the fetch URL.
+  `PUSHED`. Derive `<owner>/<repo>` from `PUSH_URL` and use this form only for a
+  github.com push URL; another host reports `UNVERIFIED`. A differing URL
+  verifies only the fetch URL.
 - Positive control: query the known base branch and require a ref. An empty
   candidate result proves nothing until the same command returns the control.
 - A successful push proves transfer only; it does not prove CI, review,
@@ -346,9 +347,8 @@ an owner decision, not a default.
 
 1. **New branch on a writable remote** - preserves the exact commit hash and
    leaves the remote default branch untouched.
-2. **Reconcile histories** - merge or rebase onto the remote branch, then push.
-   The commit hash changes; state that the previously proven commit no longer
-   exists.
+2. **Reconcile histories** - merge or rebase, then push; the commit hash changes
+   and the previously proven commit no longer exists.
 3. **Leave the commit local** - report its hash, branch and worktree path.
 
 For an account request, name the account needed, the protocol, and that login or
@@ -401,8 +401,10 @@ VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<
   `remote.origin.push` unset. `gh auth status` still names `BaBiYeuCon`
   (HTTPS preference) with the `repo` scope; `gh api` returns `push:false`,
   `private:false`, `visibility:public`. One ED25519 key
-  `qoder-skills-2026-10-26` is loaded; `ssh -o BatchMode=yes -T git@github.com`
-  prints `Permission denied (publickey)` and exits 255.
+  `qoder-skills-2026-10-26` is loaded, so the unpinned probe was unambiguous;
+  `ssh -o BatchMode=yes -T git@github.com` prints `Permission denied
+  (publickey)` and exits 255. Fetch and push URL matched, so the slug/host
+  rules were preventive, not measured.
 - Local `main` moved from `663b2d6` (06:16:11) through `65fed42` (06:29:52),
   `c7c5db6` (06:43:42) and `9d47ba4` (06:46:59) to `a839af7` (06:49:15); the
   remote head stayed `8a6423f`. The writers after the task were not measured;
@@ -452,8 +454,9 @@ VERDICT: BLOCKED (<reason>) | PUSHED_AND_VERIFIED (<sha>) | PUSHED_UNVERIFIED (<
 - `push.autosetupremote` or `-u` changes tracking; report any upstream change.
 - Verify the pushed ref at the push URL with `ls-remote`, comparing full object
   IDs; `refs/remotes/...` is a cache, not proof.
-- Capture the push's own exit code outside any pipeline. A forced update is not
-  a proven push of the commit you validated.
+- Capture the push's and each probe's own exit code outside any pipeline;
+  `ssh-add -l` and `ssh -T` exit 1 are valid results. A forced update is not a
+  proven push of the commit you validated.
 - Never generate or install credentials or keys from this gate; that is a
   separate explicit owner task.
 - Never add or edit remotes, change credentials or git config, or alter refs on
