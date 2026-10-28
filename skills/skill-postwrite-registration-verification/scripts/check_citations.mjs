@@ -10,7 +10,7 @@ import path from "node:path";
 const EXT_RE =
   "(?:mjs|cjs|js|ts|tsx|jsx|py|sh|bash|swift|md|markdown|json|ya?ml|toml|csv|txt|html|css|pdf|go|rb)";
 const CITATION_RE = new RegExp(
-  "([~A-Za-z0-9._/-]+\\." + EXT_RE + "):([+\\-\\d][A-Za-z0-9_.+\\-]*)",
+  "([~A-Za-z0-9._/-]+\\." + EXT_RE + "):([+\\-\\d.][A-Za-z0-9_.+\\-/:]*)",
   "g",
 );
 const PRINT_CAP = 120;
@@ -134,9 +134,9 @@ for (const file of mdFiles) {
   while ((m = CITATION_RE.exec(text)) !== null) {
     total++;
     const [, ref, rawRange] = m;
-    // A final full stop may be sentence punctuation. Validate the complete
+    // A final full stop or colon may be prose punctuation. Validate the complete
     // remaining token, never a numeric prefix of a decimal/exponent/bad range.
-    const range = rawRange.replace(/\.$/, "");
+    const range = rawRange.replace(/[.:]$/, "");
     const endpoints = /^([+-]?\d+)(?:-([+-]?\d+))?$/.exec(range);
     const [, startStr, endStr] = endpoints ?? [];
     const start = Number(startStr);
