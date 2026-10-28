@@ -98,9 +98,14 @@ Use only an authorized source root. Take the citation count from the output;
 zero citations means not applicable, not semantic validation. The checker proves
 file existence and line bounds, not that the cited text supports the claim.
 Read the relevant span and compare the actual wording, not just the first line.
-Reject reversed ranges and nonpositive endpoints before accepting a citation
-verdict. The bundled citation checker does not reliably reject those inputs;
-a clean verdict cannot override that manual check.
+Require positive safe-integer endpoints in ascending order (equal endpoints are
+allowed). The bundled citation checker rejects reversed, nonpositive, missing
+range endpoints and out-of-bounds lines before accessing the cited lines.
+Run its focused CLI regression controls after changing the checker:
+
+```sh
+node --test "$PACKAGE_DIR/scripts/check_citations.test.mjs"
+```
 
 Record structural and semantic results separately. For stale historical pointers,
 identify the affected reference and the exact limitation; a shifted range may
@@ -344,3 +349,5 @@ other skills or scripts outside the approved package scope.
   the 20-assertion self-test and opt-in inline-resource checks.
 - [Citation checker](scripts/check_citations.mjs): Node.js built-ins only;
   validates citation structure, not meaning.
+- [Citation regression tests](scripts/check_citations.test.mjs): Node.js built-ins
+  only; exercise range failures and valid/missing-file controls via the CLI.

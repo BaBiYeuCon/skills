@@ -10,7 +10,7 @@ import path from "node:path";
 const EXT_RE =
   "(?:mjs|cjs|js|ts|tsx|jsx|py|sh|bash|swift|md|markdown|json|ya?ml|toml|csv|txt|html|css|pdf|go|rb)";
 const CITATION_RE = new RegExp(
-  "([~A-Za-z0-9._/-]+\\." + EXT_RE + "):(\\d+)(?:-(\\d+))?",
+  "([~A-Za-z0-9._/-]+\\." + EXT_RE + "):([+\\-\\d][A-Za-z0-9_.+\\-]*)",
   "g",
 );
 const PRINT_CAP = 120;
@@ -133,10 +133,24 @@ for (const file of mdFiles) {
   CITATION_RE.lastIndex = 0;
   while ((m = CITATION_RE.exec(text)) !== null) {
     total++;
-    const [, ref, startStr, endStr] = m;
+    const [, ref, rawRange] = m;
+    // A final full stop may be sentence punctuation. Validate the complete
+    // remaining token, never a numeric prefix of a decimal/exponent/bad range.
+    const range = rawRange.replace(/\.$/, "");
+    const endpoints = /^([+-]?\d+)(?:-([+-]?\d+))?$/.exec(range);
+    const [, startStr, endStr] = endpoints ?? [];
     const start = Number(startStr);
     const end = endStr === undefined ? start : Number(endStr);
     const here = `${own}:${text.slice(0, m.index).split(/\r?\n/).length}`;
+    const citation = `${ref}:${range}`;
+    // Validate both endpoints before resolving or indexing the target. Include
+    // signed and empty range endpoints in extraction so they cannot pass as a
+    // valid prefix or disappear from the scan.
+    if (!endpoints || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) ||
+        start < 1 || end < 1 || end < start) {
+      problems.push(`${here} -> ${citation} invalid line range (require positive safe integers with start <= end)`);
+      continue;
+    }
     const { found, candidates, byName, ambiguous } = resolveTarget(ref);
     if (!found) {
       if (ambiguous)
@@ -151,12 +165,12 @@ for (const file of mdFiles) {
     filesUsed.add(found);
     const lines = fs.readFileSync(found, "utf8").split(/\r?\n/);
     const max = lines.length;
-    if (start < 1 || start > max) {
+    if (start > max) {
       problems.push(`${here} -> ${ref}:${startStr} line out of range (${max} lines)`);
       continue;
     }
     if (end > max) {
-      problems.push(`${here} -> ${ref}-${end} end line out of range (${max} lines)`);
+      problems.push(`${here} -> ${citation} end line out of range (${max} lines)`);
       continue;
     }
     const clip = (s) => s.replace(/\s+/g, " ").trim().slice(0, 140);
